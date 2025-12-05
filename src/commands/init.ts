@@ -5,6 +5,7 @@
 import { prompt } from 'enquirer';
 import chalk from 'chalk';
 import ora from 'ora';
+import path from 'path';
 import type { HackathonConfig, HackathonTrack, ToolSelection } from '../types.js';
 import {
   HACKATHON_NAME,
@@ -35,6 +36,60 @@ interface InitOptions {
   mcp?: boolean;
   json?: boolean;
   quiet?: boolean;
+}
+
+/**
+ * Validates and sanitizes a project name to prevent path traversal attacks
+ * @param name - The project name to validate
+ * @returns A sanitized project name or default if validation fails
+ */
+function sanitizeProjectName(name: string): string {
+  // Default fallback
+  const defaultName = 'hackathon-project';
+
+  if (!name || typeof name !== 'string') {
+    return defaultName;
+  }
+
+  // Trim whitespace
+  const trimmed = name.trim();
+
+  // Reject empty strings
+  if (!trimmed) {
+    return defaultName;
+  }
+
+  // Reject path traversal patterns: .., /, \, and other dangerous characters
+  const dangerousPatterns = /[./\\:*?"<>|]/;
+  if (dangerousPatterns.test(trimmed)) {
+    return defaultName;
+  }
+
+  // Only allow alphanumeric characters, hyphens, and underscores
+  const validPattern = /^[a-zA-Z0-9_-]+$/;
+  if (!validPattern.test(trimmed)) {
+    return defaultName;
+  }
+
+  // Reject names that are too long (max 100 characters)
+  if (trimmed.length > 100) {
+    return defaultName;
+  }
+
+  return trimmed;
+}
+
+/**
+ * Gets a safe default project name from the current working directory
+ * @returns A sanitized project name
+ */
+function getDefaultProjectName(): string {
+  try {
+    const basename = path.basename(process.cwd());
+    return sanitizeProjectName(basename);
+  } catch {
+    return 'hackathon-project';
+  }
 }
 
 export async function initCommand(options: InitOptions): Promise<void> {
@@ -111,12 +166,15 @@ export async function initCommand(options: InitOptions): Promise<void> {
 
 async function runInteractive(options: InitOptions): Promise<HackathonConfig> {
   // Project name
-  const { projectName } = await prompt<{ projectName: string }>({
+  const { projectName: rawProjectName } = await prompt<{ projectName: string }>({
     type: 'input',
     name: 'projectName',
     message: 'Project name:',
-    initial: process.cwd().split('/').pop() || 'hackathon-project'
+    initial: getDefaultProjectName()
   });
+
+  // Sanitize user input
+  const projectName = sanitizeProjectName(rawProjectName);
 
   // Team name
   const { teamName } = await prompt<{ teamName: string }>({
@@ -256,7 +314,8 @@ async function runInteractive(options: InitOptions): Promise<HackathonConfig> {
 }
 
 async function runNonInteractive(options: InitOptions): Promise<HackathonConfig> {
-  const projectName = options.project || process.cwd().split('/').pop() || 'hackathon-project';
+  const rawProjectName = options.project || getDefaultProjectName();
+  const projectName = sanitizeProjectName(rawProjectName);
   const isQuiet = options.quiet || options.json;
 
   const tools: ToolSelection = {

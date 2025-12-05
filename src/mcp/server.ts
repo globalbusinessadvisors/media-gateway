@@ -89,8 +89,20 @@ export class McpServer {
 
     // Call tool
     this.handlers.set('tools/call', async (params) => {
-      const name = params?.name as string;
-      const args = params?.arguments as Record<string, unknown>;
+      // Validate required parameters
+      if (!params || typeof params !== 'object') {
+        throw new Error('Invalid params: params must be an object');
+      }
+
+      const name = params.name;
+      if (!name || typeof name !== 'string') {
+        throw new Error('Invalid params: name is required and must be a string');
+      }
+
+      const args = (params.arguments as Record<string, unknown>) || {};
+      if (typeof args !== 'object' || args === null) {
+        throw new Error('Invalid params: arguments must be an object');
+      }
 
       switch (name) {
         case 'get_hackathon_info':
@@ -117,7 +129,15 @@ export class McpServer {
           };
 
         case 'get_available_tools':
-          const category = args?.category as string;
+          // Validate category parameter if provided
+          const category = args.category as string | undefined;
+          if (category !== undefined && typeof category !== 'string') {
+            throw new Error('Invalid params: category must be a string');
+          }
+          if (category && !['ai-assistants', 'orchestration', 'databases', 'cloud-platform', 'synthesis'].includes(category)) {
+            throw new Error(`Invalid params: category must be one of: ai-assistants, orchestration, databases, cloud-platform, synthesis`);
+          }
+
           const tools = category
             ? AVAILABLE_TOOLS.filter(t => t.category === category)
             : AVAILABLE_TOOLS;
@@ -144,17 +164,17 @@ export class McpServer {
           };
 
         case 'check_tool_installed':
-          const toolName = args?.toolName as string;
+          // Validate required toolName parameter
+          const toolName = args.toolName as string | undefined;
+          if (!toolName || typeof toolName !== 'string') {
+            throw new Error('Invalid params: toolName is required and must be a string');
+          }
+
           const tool = AVAILABLE_TOOLS.find(t => t.name === toolName);
           if (!tool) {
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({ error: `Unknown tool: ${toolName}` })
-              }],
-              isError: true
-            };
+            throw new Error(`Unknown tool: ${toolName}. Available tools: ${AVAILABLE_TOOLS.map(t => t.name).join(', ')}`);
           }
+
           const installed = await checkToolInstalled(tool);
           return {
             content: [{
@@ -179,13 +199,7 @@ export class McpServer {
           };
 
         default:
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({ error: `Unknown tool: ${name}` })
-            }],
-            isError: true
-          };
+          throw new Error(`Unknown tool: ${name}. Available tools: get_hackathon_info, get_tracks, get_available_tools, get_project_status, check_tool_installed, get_resources`);
       }
     });
 
@@ -209,7 +223,15 @@ export class McpServer {
 
     // Read resource
     this.handlers.set('resources/read', async (params) => {
-      const uri = params?.uri as string;
+      // Validate required parameters
+      if (!params || typeof params !== 'object') {
+        throw new Error('Invalid params: params must be an object');
+      }
+
+      const uri = params.uri;
+      if (!uri || typeof uri !== 'string') {
+        throw new Error('Invalid params: uri is required and must be a string');
+      }
 
       switch (uri) {
         case 'hackathon://config':
@@ -253,7 +275,15 @@ export class McpServer {
 
     // Get prompt
     this.handlers.set('prompts/get', async (params) => {
-      const name = params?.name as string;
+      // Validate required parameters
+      if (!params || typeof params !== 'object') {
+        throw new Error('Invalid params: params must be an object');
+      }
+
+      const name = params.name;
+      if (!name || typeof name !== 'string') {
+        throw new Error('Invalid params: name is required and must be a string');
+      }
 
       switch (name) {
         case 'hackathon_starter':
