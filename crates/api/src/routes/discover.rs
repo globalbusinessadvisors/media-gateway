@@ -4,6 +4,18 @@ use crate::rate_limit::RateLimiter;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use std::sync::Arc;
 
+fn convert_headers(actix_headers: &actix_web::http::header::HeaderMap) -> reqwest::header::HeaderMap {
+    let mut reqwest_headers = reqwest::header::HeaderMap::new();
+    for (key, value) in actix_headers.iter() {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+            if let Ok(val) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+                reqwest_headers.insert(name, val);
+            }
+        }
+    }
+    reqwest_headers
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/discover")
@@ -30,7 +42,7 @@ async fn discover_movies(
                 service: "discovery".to_string(),
                 path: "/api/v1/discover/movies".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -48,10 +60,10 @@ async fn discover_movies(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -71,7 +83,7 @@ async fn discover_tv(
                 service: "discovery".to_string(),
                 path: "/api/v1/discover/tv".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -89,10 +101,10 @@ async fn discover_tv(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -112,7 +124,7 @@ async fn get_genres(
                 service: "discovery".to_string(),
                 path: "/api/v1/genres".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -130,9 +142,9 @@ async fn get_genres(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }

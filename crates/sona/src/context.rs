@@ -5,7 +5,7 @@
 use crate::types::{ScoredContent, RecommendationContext, TemporalContext};
 use crate::profile::UserProfile;
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Utc, Timelike};
 
 /// Context-aware filtering engine
 pub struct ContextAwareFilter;

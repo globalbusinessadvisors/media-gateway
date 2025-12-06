@@ -168,7 +168,8 @@ impl EmbeddingGenerator {
         let mut embedding = vec![0.0; EMBEDDING_DIM];
 
         // Tokenize and hash
-        let words: Vec<&str> = text.to_lowercase().split_whitespace().collect();
+        let lowercase = text.to_lowercase();
+        let words: Vec<&str> = lowercase.split_whitespace().collect();
 
         for (i, word) in words.iter().enumerate() {
             let hash = self.hash_string(word) % EMBEDDING_DIM;

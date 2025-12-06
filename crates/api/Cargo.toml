@@ -27,3 +27,9 @@ anyhow = { workspace = true }
 config = { workspace = true }
 dotenvy = { workspace = true }
 tonic = { workspace = true }
+num_cpus = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+futures-util = "0.3"
+uuid = { version = "1.11", features = ["v4"] }
+chrono = "0.4"

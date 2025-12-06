@@ -16,7 +16,7 @@ pub mod server;
 pub mod sync;
 pub mod websocket;
 
-pub use crdt::{HLCTimestamp, HybridLogicalClock, LWWRegister, ORSet, PlaybackPosition, PlaybackState};
+pub use crdt::{HLCTimestamp, HybridLogicalClock, LWWRegister, ORSet, ORSetDelta, ORSetOperation, PlaybackPosition, PlaybackState};
 pub use device::{
     AudioCodec, CommandType, DeviceCapabilities, DeviceHandoff, DeviceInfo, DevicePlatform,
     DeviceRegistry, DeviceType, HDRFormat, RemoteCommand, VideoResolution,

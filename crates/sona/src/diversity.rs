@@ -31,7 +31,7 @@ impl ApplyDiversityFilter {
         // Sort by score (descending)
         candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
-        let mut selected = Vec::new();
+        let mut selected: Vec<ScoredContent> = Vec::new();
         let mut remaining = candidates;
 
         while selected.len() < limit && !remaining.is_empty() {
@@ -48,7 +48,7 @@ impl ApplyDiversityFilter {
                 } else {
                     let candidate_embedding = get_content_embedding(candidate.content_id)?;
 
-                    let mut max_sim = 0.0;
+                    let mut max_sim: f32 = 0.0;
                     for s in &selected {
                         let selected_embedding = get_content_embedding(s.content_id)?;
                         let sim = Self::cosine_similarity(&candidate_embedding, &selected_embedding);

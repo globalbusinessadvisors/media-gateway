@@ -1,11 +1,119 @@
 use crate::config::{CircuitBreakerServiceConfig, Config};
 use crate::error::{ApiError, ApiResult};
-use failsafe::{CircuitBreaker, Config as FailsafeConfig, Error as FailsafeError};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
+
+#[derive(Clone, Debug)]
+enum CircuitState {
+    Closed,
+    Open { opened_at: Instant },
+    HalfOpen,
+}
+
+#[derive(Clone)]
+struct CircuitBreaker {
+    state: Arc<RwLock<CircuitState>>,
+    failure_count: Arc<RwLock<u32>>,
+    success_count: Arc<RwLock<u32>>,
+    config: CircuitBreakerServiceConfig,
+}
+
+impl CircuitBreaker {
+    fn new(config: CircuitBreakerServiceConfig) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(CircuitState::Closed)),
+            failure_count: Arc::new(RwLock::new(0)),
+            success_count: Arc::new(RwLock::new(0)),
+            config,
+        }
+    }
+
+    async fn is_open(&self) -> bool {
+        let state = self.state.read().await;
+        matches!(*state, CircuitState::Open { .. })
+    }
+
+    #[allow(dead_code)]
+    async fn is_half_open(&self) -> bool {
+        let state = self.state.read().await;
+        matches!(*state, CircuitState::HalfOpen)
+    }
+
+    async fn check_and_update_state(&self) {
+        let mut state = self.state.write().await;
+
+        match &*state {
+            CircuitState::Open { opened_at } => {
+                if opened_at.elapsed() >= Duration::from_secs(self.config.timeout_seconds) {
+                    *state = CircuitState::HalfOpen;
+                    debug!("Circuit breaker entering half-open state");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn record_success(&self) {
+        let mut success_count = self.success_count.write().await;
+        let mut failure_count = self.failure_count.write().await;
+        let mut state = self.state.write().await;
+
+        *success_count += 1;
+
+        match &*state {
+            CircuitState::HalfOpen => {
+                // If we get a success in half-open, close the circuit
+                *state = CircuitState::Closed;
+                *failure_count = 0;
+                *success_count = 0;
+                debug!("Circuit breaker closed after successful half-open request");
+            }
+            CircuitState::Closed => {
+                // Reset failure count on success
+                *failure_count = 0;
+            }
+            _ => {}
+        }
+    }
+
+    async fn record_failure(&self) {
+        let mut failure_count = self.failure_count.write().await;
+        let mut state = self.state.write().await;
+
+        *failure_count += 1;
+
+        match &*state {
+            CircuitState::Closed => {
+                if *failure_count >= self.config.failure_threshold {
+                    *state = CircuitState::Open {
+                        opened_at: Instant::now(),
+                    };
+                    warn!("Circuit breaker opened due to failures");
+                }
+            }
+            CircuitState::HalfOpen => {
+                // If we fail in half-open, go back to open
+                *state = CircuitState::Open {
+                    opened_at: Instant::now(),
+                };
+                warn!("Circuit breaker re-opened after failed half-open request");
+            }
+            _ => {}
+        }
+    }
+
+    async fn get_state_string(&self) -> String {
+        let state = self.state.read().await;
+        match &*state {
+            CircuitState::Closed => "closed".to_string(),
+            CircuitState::Open { .. } => "open".to_string(),
+            CircuitState::HalfOpen => "half_open".to_string(),
+        }
+    }
+}
 
 pub struct CircuitBreakerManager {
     breakers: Arc<RwLock<HashMap<String, CircuitBreaker>>>,
@@ -20,11 +128,11 @@ impl CircuitBreakerManager {
         }
     }
 
-    pub async fn get_or_create(&self, service: &str) -> Arc<CircuitBreaker> {
+    pub async fn get_or_create(&self, service: &str) -> CircuitBreaker {
         let breakers = self.breakers.read().await;
 
         if let Some(breaker) = breakers.get(service) {
-            return Arc::new(breaker.clone());
+            return breaker.clone();
         }
 
         drop(breakers);
@@ -33,13 +141,13 @@ impl CircuitBreakerManager {
 
         // Double-check after acquiring write lock
         if let Some(breaker) = breakers.get(service) {
-            return Arc::new(breaker.clone());
+            return breaker.clone();
         }
 
         let breaker = self.create_circuit_breaker(service);
         breakers.insert(service.to_string(), breaker.clone());
 
-        Arc::new(breaker)
+        breaker
     }
 
     fn create_circuit_breaker(&self, service: &str) -> CircuitBreaker {
@@ -55,11 +163,6 @@ impl CircuitBreakerManager {
                 error_rate_threshold: 0.5,
             });
 
-        let failsafe_config = FailsafeConfig::new()
-            .failure_threshold(service_config.failure_threshold)
-            .timeout(Duration::from_secs(service_config.timeout_seconds))
-            .error_rate_threshold(service_config.error_rate_threshold);
-
         debug!(
             service = service,
             failure_threshold = service_config.failure_threshold,
@@ -68,7 +171,7 @@ impl CircuitBreakerManager {
             "Created circuit breaker"
         );
 
-        CircuitBreaker::new(failsafe_config)
+        CircuitBreaker::new(service_config)
     }
 
     pub async fn call<F, T, E>(
@@ -88,13 +191,23 @@ impl CircuitBreakerManager {
 
         let breaker = self.get_or_create(service).await;
 
-        match breaker.call(operation) {
-            Ok(result) => Ok(result),
-            Err(FailsafeError::Rejected) => {
-                warn!(service = service, "Circuit breaker open");
-                Err(ApiError::CircuitBreakerOpen(service.to_string()))
+        // Check and potentially update the state
+        breaker.check_and_update_state().await;
+
+        // If circuit is open, reject the request
+        if breaker.is_open().await {
+            warn!(service = service, "Circuit breaker open");
+            return Err(ApiError::CircuitBreakerOpen(service.to_string()));
+        }
+
+        // Execute the operation
+        match operation() {
+            Ok(result) => {
+                breaker.record_success().await;
+                Ok(result)
             }
-            Err(FailsafeError::Inner(e)) => {
+            Err(e) => {
+                breaker.record_failure().await;
                 warn!(service = service, error = %e, "Service call failed");
                 Err(ApiError::ProxyError(format!("Service {} error: {}", service, e)))
             }
@@ -103,34 +216,22 @@ impl CircuitBreakerManager {
 
     pub async fn get_state(&self, service: &str) -> Option<String> {
         let breakers = self.breakers.read().await;
-        breakers.get(service).map(|b| {
-            if b.is_open() {
-                "open"
-            } else if b.is_half_open() {
-                "half_open"
-            } else {
-                "closed"
-            }
-            .to_string()
-        })
+        if let Some(breaker) = breakers.get(service) {
+            Some(breaker.get_state_string().await)
+        } else {
+            None
+        }
     }
 
     pub async fn get_all_states(&self) -> HashMap<String, String> {
         let breakers = self.breakers.read().await;
-        breakers
-            .iter()
-            .map(|(service, breaker)| {
-                let state = if breaker.is_open() {
-                    "open"
-                } else if breaker.is_half_open() {
-                    "half_open"
-                } else {
-                    "closed"
-                }
-                .to_string();
-                (service.clone(), state)
-            })
-            .collect()
+        let mut states = HashMap::new();
+
+        for (service, breaker) in breakers.iter() {
+            states.insert(service.clone(), breaker.get_state_string().await);
+        }
+
+        states
     }
 }
 

@@ -6,6 +6,7 @@ pub mod rbac;
 pub mod scopes;
 pub mod server;
 pub mod session;
+pub mod storage;
 pub mod token;
 
 #[cfg(test)]
@@ -19,4 +20,5 @@ pub use rbac::{Permission, Role, RbacManager};
 pub use scopes::{Scope, ScopeManager};
 pub use server::start_server;
 pub use session::{Session, SessionManager};
+pub use storage::AuthStorage;
 pub use token::{TokenManager, TokenType};

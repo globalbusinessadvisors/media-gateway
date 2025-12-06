@@ -1,19 +1,22 @@
-use qdrant_client::prelude::*;
-use qdrant_client::qdrant::{SearchPoints, SearchResponse as QdrantSearchResponse};
-use serde::{Deserialize, Serialize};
+use qdrant_client::Qdrant;
+use qdrant_client::qdrant::{
+    Condition, Filter, Range, SearchParams, SearchPoints, SearchResponse as QdrantSearchResponse,
+};
 use uuid::Uuid;
 
+use crate::embedding::EmbeddingService;
 use super::filters::SearchFilters;
 use super::{ContentSummary, SearchResult};
 
 /// Vector search using Qdrant HNSW
 pub struct VectorSearch {
-    client: QdrantClient,
+    client: Qdrant,
     collection_name: String,
     dimension: usize,
     ef_search: usize,
     top_k: usize,
     similarity_threshold: f32,
+    embedding_service: Option<EmbeddingService>,
 }
 
 impl VectorSearch {
@@ -23,7 +26,10 @@ impl VectorSearch {
         collection_name: String,
         dimension: usize,
     ) -> Self {
-        let client = QdrantClient::from_url(&qdrant_url).build().unwrap();
+        let client = Qdrant::from_url(&qdrant_url).build().unwrap();
+
+        // Try to create embedding service from environment
+        let embedding_service = EmbeddingService::from_env().ok();
 
         Self {
             client,
@@ -32,7 +38,14 @@ impl VectorSearch {
             ef_search: 64,
             top_k: 50,
             similarity_threshold: 0.7,
+            embedding_service,
         }
+    }
+
+    /// Set embedding service
+    pub fn with_embedding_service(mut self, service: EmbeddingService) -> Self {
+        self.embedding_service = Some(service);
+        self
     }
 
     /// Execute vector similarity search
@@ -71,7 +84,7 @@ impl VectorSearch {
         // Execute search
         let search_result = self
             .client
-            .search_points(&SearchPoints {
+            .search_points(SearchPoints {
                 collection_name: self.collection_name.clone(),
                 vector: query_vector,
                 filter,
@@ -101,7 +114,7 @@ impl VectorSearch {
         // Execute search without filters
         let search_result = self
             .client
-            .search_points(&SearchPoints {
+            .search_points(SearchPoints {
                 collection_name: self.collection_name.clone(),
                 vector: query_vector,
                 filter: None,
@@ -132,9 +145,15 @@ impl VectorSearch {
 
     /// Generate embedding for query
     async fn generate_embedding(&self, query: &str) -> anyhow::Result<Vec<f32>> {
-        // TODO: Implement actual embedding API call
-        // For now, return mock embedding
-        Ok(vec![0.0; self.dimension])
+        match &self.embedding_service {
+            Some(service) => {
+                service.generate(query).await
+            }
+            None => {
+                tracing::warn!("No embedding service configured, using zero vector");
+                Ok(vec![0.0; self.dimension])
+            }
+        }
     }
 
     /// Build Qdrant filter from search filters
@@ -143,25 +162,27 @@ impl VectorSearch {
 
         // Genre filter
         if !filters.genres.is_empty() {
-            conditions.push(Condition::matches(
-                "genres",
-                filters.genres.clone(),
-            ));
+            for genre in &filters.genres {
+                conditions.push(Condition::matches("genres", genre.clone()));
+            }
         }
 
         // Platform filter
         if !filters.platforms.is_empty() {
-            conditions.push(Condition::matches(
-                "platforms",
-                filters.platforms.clone(),
-            ));
+            for platform in &filters.platforms {
+                conditions.push(Condition::matches("platforms", platform.clone()));
+            }
         }
 
         // Year range filter
         if let Some((min_year, max_year)) = filters.year_range {
             conditions.push(Condition::range(
                 "release_year",
-                min_year as f64..max_year as f64,
+                Range {
+                    gte: Some(min_year as f64),
+                    lte: Some(max_year as f64),
+                    ..Default::default()
+                },
             ));
         }
 
@@ -179,23 +200,24 @@ impl VectorSearch {
             // Extract payload
             let payload = scored_point.payload;
 
+            let id_str = payload
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
+
             let content = ContentSummary {
-                id: Uuid::parse_str(
-                    payload
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                )?,
+                id: Uuid::parse_str(&id_str)?,
                 title: payload
                     .get("title")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
                 overview: payload
                     .get("overview")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
                 release_year: payload
                     .get("release_year")
                     .and_then(|v| v.as_integer())

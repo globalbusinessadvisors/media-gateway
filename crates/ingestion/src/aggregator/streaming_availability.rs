@@ -183,10 +183,9 @@ impl StreamingAvailabilityClient {
                 "No results array in response".to_string()
             ))?;
 
-        results.iter()
+        Ok(results.iter()
             .filter_map(|item| self.parse_content_item(item).ok())
-            .collect::<Vec<_>>()
-            .into()
+            .collect::<Vec<_>>())
     }
 
     /// Parse changes response

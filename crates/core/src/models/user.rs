@@ -272,7 +272,6 @@ pub struct UserProfile {
     pub display_name: String,
 
     /// User's home region (ISO 3166-1 alpha-2)
-    #[validate(length(equal = 2))]
     pub home_region: Region,
 
     /// User preferences

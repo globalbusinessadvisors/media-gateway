@@ -11,6 +11,7 @@ pub mod genre_mapping;
 pub mod normalizer;
 pub mod pipeline;
 pub mod rate_limit;
+pub mod repository;
 
 // Re-export main types
 pub use pipeline::{IngestionPipeline, IngestionSchedule};
@@ -20,6 +21,7 @@ pub use genre_mapping::GenreMapper;
 pub use embedding::EmbeddingGenerator;
 pub use deep_link::{DeepLinkGenerator, DeepLinkResult};
 pub use rate_limit::RateLimitManager;
+pub use repository::{ContentRepository, PostgresContentRepository, ExpiringContent};
 
 /// Common error type for the ingestion pipeline
 #[derive(Debug, thiserror::Error)]

@@ -215,7 +215,7 @@ impl Default for DiscoveryConfig {
 impl DiscoveryConfig {
     /// Load configuration from environment and config file
     pub fn load() -> anyhow::Result<Self> {
-        let mut settings = config::Config::builder()
+        let settings = config::Config::builder()
             .add_source(config::File::with_name("config/discovery").required(false))
             .add_source(config::Environment::with_prefix("DISCOVERY"))
             .build()?;

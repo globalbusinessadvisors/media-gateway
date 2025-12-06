@@ -1,8 +1,20 @@
-use crate::middleware::auth::{get_user_context, require_user_context, AuthMiddleware};
+use crate::middleware::auth::{require_user_context, AuthMiddleware};
 use crate::proxy::{ProxyRequest, ServiceProxy};
 use crate::rate_limit::RateLimiter;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use std::sync::Arc;
+
+fn convert_headers(actix_headers: &actix_web::http::header::HeaderMap) -> reqwest::header::HeaderMap {
+    let mut reqwest_headers = reqwest::header::HeaderMap::new();
+    for (key, value) in actix_headers.iter() {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+            if let Ok(val) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+                reqwest_headers.insert(name, val);
+            }
+        }
+    }
+    reqwest_headers
+}
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -33,7 +45,7 @@ async fn get_profile(
                 service: "auth".to_string(),
                 path: "/api/v1/user/profile".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: None,
             };
@@ -51,10 +63,10 @@ async fn get_profile(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -75,7 +87,7 @@ async fn update_preferences(
                 service: "auth".to_string(),
                 path: "/api/v1/user/preferences".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: Some(body),
                 query: None,
             };
@@ -93,10 +105,10 @@ async fn update_preferences(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -116,7 +128,7 @@ async fn get_watchlist(
                 service: "sync".to_string(),
                 path: "/api/v1/user/watchlist".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -134,10 +146,10 @@ async fn get_watchlist(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -158,7 +170,7 @@ async fn add_to_watchlist(
                 service: "sync".to_string(),
                 path: "/api/v1/user/watchlist".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: Some(body),
                 query: None,
             };
@@ -176,10 +188,10 @@ async fn add_to_watchlist(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -202,7 +214,7 @@ async fn remove_from_watchlist(
                 service: "sync".to_string(),
                 path: format!("/api/v1/user/watchlist/{}", content_id),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: None,
             };
@@ -220,10 +232,10 @@ async fn remove_from_watchlist(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -243,7 +255,7 @@ async fn get_history(
                 service: "sync".to_string(),
                 path: "/api/v1/user/history".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -261,9 +273,9 @@ async fn get_history(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }

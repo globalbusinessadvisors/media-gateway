@@ -18,7 +18,7 @@ pub async fn init_service(
     // Initialize database pool
     let db_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.database.max_connections)
-        .connect_timeout(std::time::Duration::from_secs(
+        .acquire_timeout(std::time::Duration::from_secs(
             config.database.connect_timeout_sec,
         ))
         .connect(&config.database.url)

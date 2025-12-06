@@ -2,7 +2,6 @@
 //!
 //! Comprehensive error handling using thiserror for ergonomic error definitions.
 
-use std::fmt;
 use thiserror::Error;
 
 /// Main error type for Media Gateway operations

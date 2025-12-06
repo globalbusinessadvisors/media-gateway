@@ -135,11 +135,12 @@ async fn sync_progress(
         playback_state,
     );
 
+    let completion_percent = update.completion_percent();
     let response = ProgressSyncResponse {
         success: true,
         content_id: update.content_id,
         position_seconds: update.position_seconds,
-        completion_percent: update.completion_percent(),
+        completion_percent,
         timestamp: update.timestamp,
     };
 

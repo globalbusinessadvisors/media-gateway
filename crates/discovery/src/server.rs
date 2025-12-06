@@ -4,7 +4,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::DiscoveryConfig;
-use crate::search::{HybridSearchService, SearchFilters, SearchRequest, SearchResponse};
+use crate::search::{HybridSearchService, SearchFilters, SearchRequest};
 
 /// Application state shared across all handlers
 pub struct AppState {

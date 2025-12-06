@@ -6,13 +6,16 @@ use crate::{
     genre_mapping::GenreMapper,
     embedding::EmbeddingGenerator,
     rate_limit::RateLimitManager,
+    repository::{ContentRepository, PostgresContentRepository},
     Result, IngestionError,
 };
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
 use tracing::{info, warn, error, debug};
+use uuid::Uuid;
 
 /// Ingestion schedule configuration
 #[derive(Debug, Clone)]
@@ -45,6 +48,7 @@ pub struct IngestionPipeline {
     genre_mapper: Arc<GenreMapper>,
     embedding_generator: Arc<EmbeddingGenerator>,
     rate_limiter: Arc<RateLimitManager>,
+    repository: Arc<dyn ContentRepository>,
     schedule: IngestionSchedule,
     regions: Vec<String>,
 }
@@ -57,6 +61,7 @@ impl IngestionPipeline {
         genre_mapper: GenreMapper,
         embedding_generator: EmbeddingGenerator,
         rate_limiter: RateLimitManager,
+        pool: PgPool,
         schedule: IngestionSchedule,
         regions: Vec<String>,
     ) -> Self {
@@ -66,6 +71,7 @@ impl IngestionPipeline {
             genre_mapper: Arc::new(genre_mapper),
             embedding_generator: Arc::new(embedding_generator),
             rate_limiter: Arc::new(rate_limiter),
+            repository: Arc::new(PostgresContentRepository::new(pool)),
             schedule,
             regions,
         }
@@ -107,6 +113,7 @@ impl IngestionPipeline {
         let genre_mapper = self.genre_mapper.clone();
         let embedding_generator = self.embedding_generator.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let repository = self.repository.clone();
         let regions = self.regions.clone();
         let schedule_duration = self.schedule.catalog_refresh;
 
@@ -124,6 +131,7 @@ impl IngestionPipeline {
                             &genre_mapper,
                             &embedding_generator,
                             &rate_limiter,
+                            repository.as_ref(),
                             region,
                         ).await {
                             error!("Catalog refresh failed for {} in {}: {}",
@@ -141,6 +149,7 @@ impl IngestionPipeline {
     fn spawn_availability_sync_task(&self) -> tokio::task::JoinHandle<()> {
         let normalizers = self.normalizers.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let repository = self.repository.clone();
         let regions = self.regions.clone();
         let schedule_duration = self.schedule.availability_sync;
 
@@ -155,6 +164,7 @@ impl IngestionPipeline {
                         if let Err(e) = Self::sync_availability(
                             normalizer.clone(),
                             &rate_limiter,
+                            repository.as_ref(),
                             region,
                         ).await {
                             error!("Availability sync failed for {} in {}: {}",
@@ -172,6 +182,7 @@ impl IngestionPipeline {
     fn spawn_expiring_content_task(&self) -> tokio::task::JoinHandle<()> {
         let normalizers = self.normalizers.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let repository = self.repository.clone();
         let regions = self.regions.clone();
         let schedule_duration = self.schedule.expiring_content;
 
@@ -186,6 +197,7 @@ impl IngestionPipeline {
                         if let Err(e) = Self::check_expiring_content(
                             normalizer.clone(),
                             &rate_limiter,
+                            repository.as_ref(),
                             region,
                         ).await {
                             warn!("Expiring content check failed for {} in {}: {}",
@@ -224,6 +236,7 @@ impl IngestionPipeline {
         genre_mapper: &GenreMapper,
         embedding_generator: &EmbeddingGenerator,
         rate_limiter: &RateLimitManager,
+        repository: &dyn ContentRepository,
         region: &str,
     ) -> Result<()> {
         let platform_id = normalizer.platform_id();
@@ -248,6 +261,7 @@ impl IngestionPipeline {
                 entity_resolver,
                 genre_mapper,
                 embedding_generator,
+                repository,
             ).await?;
         }
 
@@ -261,6 +275,7 @@ impl IngestionPipeline {
         entity_resolver: &EntityResolver,
         genre_mapper: &GenreMapper,
         embedding_generator: &EmbeddingGenerator,
+        repository: &dyn ContentRepository,
     ) -> Result<()> {
         for raw in batch {
             // Normalize to canonical format
@@ -287,9 +302,12 @@ impl IngestionPipeline {
                     .map_err(|e| IngestionError::NormalizationFailed(e.to_string()))?
             );
 
-            // TODO: Persist to database
-            debug!("Processed content: {} (entity: {:?})",
-                canonical.title, canonical.entity_id);
+            // Persist to database
+            let content_id = repository.upsert(&canonical).await
+                .map_err(|e| IngestionError::NormalizationFailed(format!("Database error: {}", e)))?;
+
+            debug!("Processed and persisted content: {} (id: {}, entity: {:?})",
+                canonical.title, content_id, canonical.entity_id);
         }
 
         Ok(())
@@ -299,6 +317,7 @@ impl IngestionPipeline {
     async fn sync_availability(
         normalizer: Arc<dyn PlatformNormalizer>,
         rate_limiter: &RateLimitManager,
+        repository: &dyn ContentRepository,
         region: &str,
     ) -> Result<()> {
         let platform_id = normalizer.platform_id();
@@ -310,7 +329,14 @@ impl IngestionPipeline {
         let since = Utc::now() - ChronoDuration::hours(1);
         let raw_items = normalizer.fetch_catalog_delta(since, region).await?;
 
-        // TODO: Update only availability fields in database
+        // TODO: Extract availability information from raw_items and update database
+        // Process each raw item:
+        // 1. Normalize to CanonicalContent to get availability info
+        // 2. Look up content by platform_content_id and platform_id
+        // 3. Update availability.regions, subscription_required, prices, available_until
+        // RawContent structure: { id, platform, data (JSON), fetched_at }
+        // Need to normalize each item to extract availability details
+
         debug!("Updated availability for {} items from {}", raw_items.len(), platform_id);
 
         Ok(())
@@ -320,14 +346,23 @@ impl IngestionPipeline {
     async fn check_expiring_content(
         normalizer: Arc<dyn PlatformNormalizer>,
         rate_limiter: &RateLimitManager,
+        repository: &dyn ContentRepository,
         region: &str,
     ) -> Result<()> {
         let platform_id = normalizer.platform_id();
 
         rate_limiter.check_and_wait(platform_id).await?;
 
-        // TODO: Query database for content expiring in next 7 days
-        // TODO: Update expiration dates from platform data
+        // Query database for content expiring in next 7 days
+        let expiring = repository.find_expiring_within(ChronoDuration::days(7)).await
+            .map_err(|e| IngestionError::NormalizationFailed(e.to_string()))?;
+
+        for item in expiring {
+            if item.platform == platform_id && item.region == region {
+                info!("Content '{}' on {} expires at {}",
+                    item.title, item.platform, item.expires_at);
+            }
+        }
 
         Ok(())
     }

@@ -445,7 +445,7 @@ impl SearchResult {
 }
 
 /// Autocomplete suggestion
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 pub struct AutocompleteSuggestion {
     /// Suggested text
     #[validate(length(min = 1, max = 200))]

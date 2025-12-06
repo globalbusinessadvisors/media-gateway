@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Result, IngestionError, deep_link::DeepLinkResult};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, Datelike};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::time::Duration;

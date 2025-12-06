@@ -5,10 +5,12 @@
 //! Latency target: <500ms p95
 
 use actix_web::{web, App, HttpServer, HttpResponse};
-use tracing::{info, warn};
+use tracing::info;
+use std::sync::Arc;
+use media_gateway_discovery::{config, server};
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -17,14 +19,36 @@ async fn main() -> std::io::Result<()> {
 
     info!("Starting Discovery Service on port 8081");
 
-    HttpServer::new(|| {
+    // Load configuration
+    let config = Arc::new(config::DiscoveryConfig::load()?);
+    let bind_addr = format!("{}:{}", config.server.host, config.server.port);
+
+    info!("Discovery Service listening on {}", bind_addr);
+
+    // Initialize service components
+    let search_service = media_gateway_discovery::init_service(config.clone()).await?;
+
+    // Create application state
+    let app_state = web::Data::new(server::AppState {
+        config: config.clone(),
+        search_service,
+    });
+
+    // Start HTTP server with routes
+    HttpServer::new(move || {
         App::new()
+            .app_data(app_state.clone())
             .route("/health", web::get().to(health_check))
             .route("/ready", web::get().to(readiness_check))
+            .configure(server::configure_routes)
+            .wrap(actix_web::middleware::Logger::default())
     })
-    .bind(("0.0.0.0", 8081))?
+    .workers(config.server.workers.unwrap_or_else(num_cpus::get))
+    .bind(&bind_addr)?
     .run()
-    .await
+    .await?;
+
+    Ok(())
 }
 
 async fn health_check() -> HttpResponse {

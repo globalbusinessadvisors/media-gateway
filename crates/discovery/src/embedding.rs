@@ -1,26 +1,30 @@
+//! OpenAI Embedding Service for semantic search
+
+use anyhow::{anyhow, Result};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
+use tracing::{warn};
 
-/// Embedding service for generating query embeddings
-pub struct EmbeddingService {
-    client: reqwest::Client,
-    api_url: String,
-    api_key: String,
-    model: String,
-    cache: Arc<RwLock<HashMap<String, Vec<f32>>>>,
-}
+const OPENAI_API_URL: &str = "https://api.openai.com/v1/embeddings";
+const EMBEDDING_MODEL: &str = "text-embedding-3-small";
+const EMBEDDING_DIMENSION: usize = 768;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF_MS: u64 = 100;
 
-/// Embedding API request
+/// OpenAI embedding request
 #[derive(Debug, Serialize)]
 struct EmbeddingRequest {
-    model: String,
     input: String,
-    encoding_format: String,
+    model: String,
+    dimensions: Option<usize>,
 }
 
-/// Embedding API response
+/// OpenAI embedding response
 #[derive(Debug, Deserialize)]
 struct EmbeddingResponse {
     data: Vec<EmbeddingData>,
@@ -36,24 +40,62 @@ struct EmbeddingData {
 
 #[derive(Debug, Deserialize)]
 struct Usage {
-    prompt_tokens: usize,
-    total_tokens: usize,
+    prompt_tokens: u32,
+    total_tokens: u32,
+}
+
+/// OpenAI error response
+#[derive(Debug, Deserialize)]
+struct ErrorResponse {
+    error: ApiError,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiError {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: String,
+}
+
+/// Embedding service using OpenAI API
+#[derive(Clone)]
+pub struct EmbeddingService {
+    client: Client,
+    api_key: String,
+    dimension: usize,
+    cache: Arc<RwLock<HashMap<String, Vec<f32>>>>,
 }
 
 impl EmbeddingService {
     /// Create new embedding service
-    pub fn new(api_url: String, api_key: String, model: String) -> Self {
+    pub fn new(api_key: String) -> Self {
+        let client = Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("Failed to create HTTP client");
+
         Self {
-            client: reqwest::Client::new(),
-            api_url,
+            client,
             api_key,
-            model,
+            dimension: EMBEDDING_DIMENSION,
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Generate embedding for text
-    pub async fn generate(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+    /// Create from OPENAI_API_KEY environment variable
+    pub fn from_env() -> Result<Self> {
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| anyhow!("OPENAI_API_KEY environment variable not set"))?;
+        Ok(Self::new(api_key))
+    }
+
+    /// Get embedding dimension
+    pub fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    /// Generate embedding for text with retries
+    pub async fn generate(&self, text: &str) -> Result<Vec<f32>> {
         // Check cache first
         {
             let cache = self.cache.read().await;
@@ -63,94 +105,81 @@ impl EmbeddingService {
             }
         }
 
-        // Call API
-        let embedding = self.call_api(text).await?;
+        let mut last_error = None;
+        let mut backoff_ms = INITIAL_BACKOFF_MS;
 
-        // L2 normalize
-        let normalized = self.l2_normalize(&embedding);
+        for attempt in 1..=MAX_RETRIES {
+            match self.call_api(text).await {
+                Ok(embedding) => {
+                    // Store in cache
+                    {
+                        let mut cache = self.cache.write().await;
+                        cache.insert(text.to_string(), embedding.clone());
+                    }
+                    return Ok(embedding);
+                }
+                Err(e) => {
+                    warn!("Embedding attempt {} failed: {}. Retrying in {}ms...",
+                        attempt, e, backoff_ms);
+                    last_error = Some(e);
 
-        // Store in cache
-        {
-            let mut cache = self.cache.write().await;
-            cache.insert(text.to_string(), normalized.clone());
+                    if attempt < MAX_RETRIES {
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        backoff_ms *= 2; // Exponential backoff
+                    }
+                }
+            }
         }
 
-        Ok(normalized)
+        Err(last_error.unwrap_or_else(|| anyhow!("Embedding failed after {} attempts", MAX_RETRIES)))
     }
 
-    /// Generate embeddings for multiple texts (batched)
-    pub async fn generate_batch(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
-        let mut results = Vec::new();
+    /// Generate embeddings for multiple texts (batch)
+    pub async fn generate_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let mut results = Vec::with_capacity(texts.len());
 
-        // TODO: Implement actual batch API call
-        // For now, call individually
+        // Process sequentially to avoid rate limits
         for text in texts {
-            let embedding = self.generate(&text).await?;
-            results.push(embedding);
+            results.push(self.generate(text).await?);
         }
 
         Ok(results)
     }
 
-    /// Call embedding API
-    async fn call_api(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+    /// Call OpenAI API
+    async fn call_api(&self, text: &str) -> Result<Vec<f32>> {
         let request = EmbeddingRequest {
-            model: self.model.clone(),
             input: text.to_string(),
-            encoding_format: "float".to_string(),
+            model: EMBEDDING_MODEL.to_string(),
+            dimensions: Some(self.dimension),
         };
 
-        let response = self
-            .client
-            .post(&self.api_url)
+        let response = self.client
+            .post(OPENAI_API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
             .json(&request)
-            .timeout(std::time::Duration::from_secs(5))
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await?;
-            anyhow::bail!("Embedding API error {}: {}", status, body);
+        let status = response.status();
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            if let Ok(error_response) = serde_json::from_str::<ErrorResponse>(&error_text) {
+                return Err(anyhow!("OpenAI API error ({}): {} - {}",
+                    status, error_response.error.error_type, error_response.error.message));
+            }
+            return Err(anyhow!("OpenAI API error ({}): {}", status, error_text));
         }
 
-        let response_body: EmbeddingResponse = response.json().await?;
+        let embedding_response: EmbeddingResponse = response.json().await?;
 
-        if response_body.data.is_empty() {
-            anyhow::bail!("No embeddings returned");
+        if embedding_response.data.is_empty() {
+            return Err(anyhow!("Empty embedding response from OpenAI"));
         }
 
-        Ok(response_body.data[0].embedding.clone())
-    }
-
-    /// L2 normalize vector
-    fn l2_normalize(&self, vector: &[f32]) -> Vec<f32> {
-        let magnitude: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-        if magnitude == 0.0 {
-            return vector.to_vec();
-        }
-
-        vector.iter().map(|x| x / magnitude).collect()
-    }
-
-    /// Calculate cosine similarity between two vectors
-    pub fn cosine_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
-        if a.len() != b.len() {
-            return 0.0;
-        }
-
-        let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-
-        let magnitude_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let magnitude_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-        if magnitude_a == 0.0 || magnitude_b == 0.0 {
-            return 0.0;
-        }
-
-        dot_product / (magnitude_a * magnitude_b)
+        Ok(embedding_response.data[0].embedding.clone())
     }
 
     /// Clear cache
@@ -171,42 +200,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_l2_normalize() {
-        let service = EmbeddingService::new(
-            "http://test".to_string(),
-            "test".to_string(),
-            "test".to_string(),
-        );
-
-        let vector = vec![3.0, 4.0];
-        let normalized = service.l2_normalize(&vector);
-
-        assert_eq!(normalized, vec![0.6, 0.8]);
+    fn test_embedding_service_creation() {
+        let service = EmbeddingService::new("test-key".to_string());
+        assert_eq!(service.dimension(), 768);
     }
 
     #[test]
-    fn test_cosine_similarity() {
-        let service = EmbeddingService::new(
-            "http://test".to_string(),
-            "test".to_string(),
-            "test".to_string(),
-        );
+    fn test_request_serialization() {
+        let request = EmbeddingRequest {
+            input: "test query".to_string(),
+            model: EMBEDDING_MODEL.to_string(),
+            dimensions: Some(768),
+        };
 
-        let a = vec![1.0, 0.0];
-        let b = vec![1.0, 0.0];
-        let c = vec![0.0, 1.0];
-
-        assert_eq!(service.cosine_similarity(&a, &b), 1.0);
-        assert_eq!(service.cosine_similarity(&a, &c), 0.0);
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("text-embedding-3-small"));
+        assert!(json.contains("768"));
     }
 
     #[tokio::test]
     async fn test_cache() {
-        let service = EmbeddingService::new(
-            "http://test".to_string(),
-            "test".to_string(),
-            "test".to_string(),
-        );
+        let service = EmbeddingService::new("test-key".to_string());
 
         // Manually add to cache
         {

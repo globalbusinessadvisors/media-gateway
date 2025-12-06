@@ -2,6 +2,7 @@ use media_gateway_auth::{
     jwt::JwtManager,
     oauth::OAuthConfig,
     session::SessionManager,
+    storage::AuthStorage,
     server::start_server,
 };
 use std::{env, fs, sync::Arc};
@@ -56,6 +57,12 @@ async fn main() -> std::io::Result<()> {
         providers: std::collections::HashMap::new(),
     };
 
+    // Initialize auth storage (Redis-backed)
+    let auth_storage = Arc::new(
+        AuthStorage::new(&redis_url)
+            .expect("Failed to initialize auth storage"),
+    );
+
     // Start server
-    start_server(&bind_address, jwt_manager, session_manager, oauth_config).await
+    start_server(&bind_address, jwt_manager, session_manager, oauth_config, auth_storage).await
 }

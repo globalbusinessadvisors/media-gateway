@@ -173,7 +173,7 @@ pub(crate) fn extract_f64(value: &serde_json::Value, key: &str) -> Option<f64> {
 }
 
 /// Helper function to extract array from JSON value
-pub(crate) fn extract_array(value: &serde_json::Value, key: &str) -> Option<&Vec<serde_json::Value>> {
+pub(crate) fn extract_array<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a Vec<serde_json::Value>> {
     value.get(key)?.as_array()
 }
 

@@ -1,5 +1,4 @@
 use crate::circuit_breaker::CircuitBreakerManager;
-use crate::config::Config;
 use crate::proxy::ServiceProxy;
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};

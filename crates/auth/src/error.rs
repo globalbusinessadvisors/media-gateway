@@ -1,5 +1,4 @@
 use actix_web::{HttpResponse, ResponseError};
-use std::fmt;
 
 pub type Result<T> = std::result::Result<T, AuthError>;
 
@@ -171,3 +170,5 @@ impl From<jsonwebtoken::errors::Error> for AuthError {
         AuthError::InvalidToken(err.to_string())
     }
 }
+
+// ResponseError trait already provides From<AuthError> for actix_web::Error

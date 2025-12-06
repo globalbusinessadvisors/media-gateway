@@ -98,7 +98,7 @@ impl RateLimiter {
     async fn check_sliding_window(
         &self,
         user_id: &str,
-        tier: &RateLimitTier,
+        _tier: &RateLimitTier,
         window_seconds: i64,
         limit: u32,
     ) -> ApiResult<RateLimitInfo> {

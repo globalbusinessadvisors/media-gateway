@@ -15,6 +15,11 @@ path = "src/main.rs"
 media-gateway-core = { workspace = true }
 tokio = { workspace = true }
 async-trait = "0.1"
+actix-web = { workspace = true }
+actix-rt = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
 
 # HTTP client
 reqwest = { workspace = true }

@@ -6,6 +6,18 @@ use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use std::sync::Arc;
 use tracing::debug;
 
+fn convert_headers(actix_headers: &actix_web::http::header::HeaderMap) -> reqwest::header::HeaderMap {
+    let mut reqwest_headers = reqwest::header::HeaderMap::new();
+    for (key, value) in actix_headers.iter() {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+            if let Ok(val) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+                reqwest_headers.insert(name, val);
+            }
+        }
+    }
+    reqwest_headers
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/content")
@@ -53,7 +65,7 @@ async fn get_content(
                 service: "discovery".to_string(),
                 path: format!("/api/v1/content/{}", content_id),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -74,10 +86,10 @@ async fn get_content(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -100,7 +112,7 @@ async fn get_availability(
                 service: "discovery".to_string(),
                 path: format!("/api/v1/content/{}/availability", content_id),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -118,10 +130,10 @@ async fn get_availability(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -141,7 +153,7 @@ async fn get_trending(
                 service: "discovery".to_string(),
                 path: "/api/v1/content/trending".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -159,10 +171,10 @@ async fn get_trending(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -182,7 +194,7 @@ async fn get_popular_movies(
                 service: "discovery".to_string(),
                 path: "/api/v1/movies/popular".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -200,10 +212,10 @@ async fn get_popular_movies(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -223,7 +235,7 @@ async fn get_popular_tv(
                 service: "discovery".to_string(),
                 path: "/api/v1/tv/popular".to_string(),
                 method: req.method().clone(),
-                headers: req.headers().clone(),
+                headers: convert_headers(req.headers()),
                 body: None,
                 query: req.query_string().is_empty().then(|| req.query_string().to_string()),
             };
@@ -241,9 +253,9 @@ async fn get_popular_tv(
 
                     http_response.body(response.body)
                 }
-                Err(err) => HttpResponse::from_error(err.into()),
+                Err(err) => HttpResponse::from_error(err),
             }
         }
-        Err(err) => HttpResponse::from_error(err.into()),
+        Err(err) => HttpResponse::from_error(err),
     }
 }

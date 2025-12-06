@@ -121,6 +121,7 @@ lazy_static = "1"
 regex = "1"
 url = { version = "2", features = ["serde"] }
 bytes = "1"
+num_cpus = "1.16"
 
 # CLI (for services that need it)
 clap = { version = "4", features = ["derive", "env"] }

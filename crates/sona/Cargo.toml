@@ -27,11 +27,12 @@ config = { workspace = true }
 dotenvy = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+qdrant-client = { workspace = true }
 
 # Linear algebra and ML dependencies (SONA-specific)
 ndarray = { version = "0.16", features = ["rayon"] }
 ndarray-linalg = { version = "0.16", features = ["intel-mkl-static"] }
-ort = { version = "2.0", features = ["download-binaries"] }
+ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"

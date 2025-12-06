@@ -9,6 +9,7 @@ use crate::{
     rbac::RbacManager,
     scopes::ScopeManager,
     session::SessionManager,
+    storage::AuthStorage,
     token::TokenManager,
 };
 use actix_web::{
@@ -17,8 +18,7 @@ use actix_web::{
     App, HttpResponse, HttpServer, Responder,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::RwLock;
+use std::sync::Arc;
 
 /// Application state shared across handlers
 pub struct AppState {
@@ -27,11 +27,7 @@ pub struct AppState {
     pub oauth_manager: Arc<OAuthManager>,
     pub rbac_manager: Arc<RbacManager>,
     pub scope_manager: Arc<ScopeManager>,
-
-    // In-memory storage for demo (use Redis/DB in production)
-    pub pkce_sessions: Arc<RwLock<HashMap<String, PkceChallenge>>>,
-    pub auth_codes: Arc<RwLock<HashMap<String, AuthorizationCode>>>,
-    pub device_codes: Arc<RwLock<HashMap<String, DeviceCode>>>,
+    pub storage: Arc<AuthStorage>,
 }
 
 // ============================================================================
@@ -94,7 +90,7 @@ async fn authorize(
     };
 
     let session_state = pkce.state.clone();
-    state.pkce_sessions.write().await.insert(session_state.clone(), pkce);
+    state.storage.store_pkce(&session_state, &pkce).await?;
 
     // In a real implementation, redirect to login page
     // For now, return authorization page URL
@@ -152,11 +148,10 @@ async fn exchange_authorization_code(
     let client_id = form.client_id.as_ref().ok_or(AuthError::InvalidClient)?;
 
     // Retrieve authorization code
-    let mut auth_codes = state.auth_codes.write().await;
-    let mut auth_code = auth_codes
-        .get(code)
-        .ok_or(AuthError::InvalidAuthCode)?
-        .clone();
+    let mut auth_code = state.storage
+        .get_auth_code(code)
+        .await?
+        .ok_or(AuthError::InvalidAuthCode)?;
 
     // Check if already used
     if auth_code.used {
@@ -166,7 +161,7 @@ async fn exchange_authorization_code(
 
     // Check expiration
     if auth_code.is_expired() {
-        auth_codes.remove(code);
+        state.storage.delete_auth_code(code).await?;
         return Err(AuthError::InvalidAuthCode);
     }
 
@@ -180,7 +175,7 @@ async fn exchange_authorization_code(
 
     // Mark as used
     auth_code.mark_as_used();
-    auth_codes.insert(code.clone(), auth_code.clone());
+    state.storage.update_auth_code(code, &auth_code).await?;
 
     // Generate tokens
     let access_token = state.jwt_manager.create_access_token(
@@ -262,9 +257,9 @@ async fn exchange_device_code(form: &TokenRequest, state: &AppState) -> Result<H
     let device_code = form.device_code.as_ref().ok_or(AuthError::DeviceCodeNotFound)?;
 
     // Retrieve device code
-    let device_codes = state.device_codes.read().await;
-    let device = device_codes
-        .get(device_code)
+    let device = state.storage
+        .get_device_code(device_code)
+        .await?
         .ok_or(AuthError::DeviceCodeNotFound)?;
 
     // Check status
@@ -355,27 +350,23 @@ async fn device_authorization(
     let response = DeviceAuthorizationResponse::from(&device);
 
     // Store device code
-    state
-        .device_codes
-        .write()
-        .await
-        .insert(device.device_code.clone(), device);
+    state.storage.store_device_code(&device.device_code, &device).await?;
 
     Ok(HttpResponse::Ok().json(response))
 }
 
 #[get("/auth/device/poll")]
 async fn device_poll(
-    query: web::Query<HashMap<String, String>>,
+    query: web::Query<std::collections::HashMap<String, String>>,
     state: Data<AppState>,
 ) -> Result<impl Responder> {
     let device_code = query
         .get("device_code")
         .ok_or(AuthError::DeviceCodeNotFound)?;
 
-    let device_codes = state.device_codes.read().await;
-    let device = device_codes
-        .get(device_code)
+    let device = state.storage
+        .get_device_code(device_code)
+        .await?
         .ok_or(AuthError::DeviceCodeNotFound)?;
 
     device.check_status()?;
@@ -395,6 +386,7 @@ pub async fn start_server(
     jwt_manager: Arc<JwtManager>,
     session_manager: Arc<SessionManager>,
     oauth_config: OAuthConfig,
+    storage: Arc<AuthStorage>,
 ) -> std::io::Result<()> {
     let app_state = Data::new(AppState {
         jwt_manager,
@@ -402,9 +394,7 @@ pub async fn start_server(
         oauth_manager: Arc::new(OAuthManager::new(oauth_config)),
         rbac_manager: Arc::new(RbacManager::new()),
         scope_manager: Arc::new(ScopeManager::new()),
-        pkce_sessions: Arc::new(RwLock::new(HashMap::new())),
-        auth_codes: Arc::new(RwLock::new(HashMap::new())),
-        device_codes: Arc::new(RwLock::new(HashMap::new())),
+        storage,
     });
 
     tracing::info!("Starting auth service on {}", bind_address);

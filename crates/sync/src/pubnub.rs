@@ -10,6 +10,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 
 /// PubNub client configuration
 #[derive(Debug, Clone)]
@@ -100,11 +102,56 @@ impl PubNubClient {
         Ok(publish_response)
     }
 
+    /// Subscribe to channels with message callback
+    pub async fn subscribe_with_handler(
+        self: Arc<Self>,
+        channels: Vec<String>,
+        handler: Arc<dyn MessageHandler>,
+    ) -> Result<SubscriptionManager, PubNubError> {
+        Ok(SubscriptionManager::new(self, handler, channels))
+    }
+
     /// Subscribe to channels (establishes long-poll connection)
     pub async fn subscribe(&self, channels: Vec<String>) -> Result<(), PubNubError> {
-        // In production, this would establish a persistent connection
-        // For now, this is a placeholder
         tracing::info!("Subscribing to channels: {:?}", channels);
+
+        // Initial subscribe request to get timetoken
+        let channels_str = channels.join(",");
+        let url = format!(
+            "https://{}/v2/subscribe/{}/{}/0/0",
+            self.config.origin,
+            self.config.subscribe_key,
+            channels_str
+        );
+
+        self.http_client
+            .get(&url)
+            .query(&[("uuid", &self.device_id)])
+            .send()
+            .await
+            .map_err(|e| PubNubError::NetworkError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Unsubscribe from channels
+    pub async fn unsubscribe(&self, channels: Vec<String>) -> Result<(), PubNubError> {
+        let channels_str = channels.join(",");
+        let url = format!(
+            "https://{}/v2/presence/sub-key/{}/channel/{}/leave",
+            self.config.origin,
+            self.config.subscribe_key,
+            channels_str
+        );
+
+        self.http_client
+            .get(&url)
+            .query(&[("uuid", &self.device_id)])
+            .send()
+            .await
+            .map_err(|e| PubNubError::NetworkError(e.to_string()))?;
+
+        tracing::info!("Unsubscribed from channels: {:?}", channels);
         Ok(())
     }
 
@@ -290,4 +337,143 @@ pub enum RemoteCommand {
 
     #[serde(rename = "cast")]
     Cast { content_id: String },
+}
+
+/// Message handler callback trait
+#[async_trait::async_trait]
+pub trait MessageHandler: Send + Sync {
+    async fn handle_sync_message(&self, message: SyncMessage);
+    async fn handle_device_message(&self, message: DeviceMessage);
+    async fn handle_raw_message(&self, channel: &str, message: serde_json::Value);
+}
+
+/// Subscription manager for handling real-time messages
+pub struct SubscriptionManager {
+    client: Arc<PubNubClient>,
+    handler: Arc<dyn MessageHandler>,
+    channels: Vec<String>,
+    running: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SubscriptionManager {
+    pub fn new(
+        client: Arc<PubNubClient>,
+        handler: Arc<dyn MessageHandler>,
+        channels: Vec<String>,
+    ) -> Self {
+        Self {
+            client,
+            handler,
+            channels,
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Start subscription loop
+    pub async fn start(&self) -> Result<(), PubNubError> {
+        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut timetoken = "0".to_string();
+
+        tracing::info!("Starting PubNub subscription for channels: {:?}", self.channels);
+
+        while self.running.load(std::sync::atomic::Ordering::SeqCst) {
+            match self.poll_messages(&timetoken).await {
+                Ok((messages, new_timetoken)) => {
+                    timetoken = new_timetoken;
+
+                    for (channel, message) in messages {
+                        self.dispatch_message(&channel, message).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Subscription error: {}. Reconnecting in 5s...", e);
+                    sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stop subscription loop
+    pub fn stop(&self) {
+        self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Poll for new messages (long-poll)
+    async fn poll_messages(
+        &self,
+        timetoken: &str,
+    ) -> Result<(Vec<(String, serde_json::Value)>, String), PubNubError> {
+        let channels = self.channels.join(",");
+        let url = format!(
+            "https://{}/v2/subscribe/{}/{}/0/{}",
+            self.client.config.origin,
+            self.client.config.subscribe_key,
+            channels,
+            timetoken
+        );
+
+        let response = self.client.http_client
+            .get(&url)
+            .query(&[("uuid", &self.client.device_id)])
+            .timeout(Duration::from_secs(310)) // PubNub long-poll timeout
+            .send()
+            .await
+            .map_err(|e| PubNubError::NetworkError(e.to_string()))?;
+
+        let body: SubscribeResponse = response
+            .json()
+            .await
+            .map_err(|e| PubNubError::DeserializationError(e.to_string()))?;
+
+        let mut messages = Vec::new();
+        for (i, msg) in body.messages.into_iter().enumerate() {
+            if let Some(channel) = body.channels.get(i) {
+                messages.push((channel.clone(), msg));
+            }
+        }
+
+        Ok((messages, body.timetoken.t))
+    }
+
+    /// Dispatch message to appropriate handler
+    async fn dispatch_message(&self, channel: &str, message: serde_json::Value) {
+        // Try to parse as SyncMessage
+        if channel.contains(".sync") {
+            if let Ok(sync_msg) = serde_json::from_value::<SyncMessage>(message.clone()) {
+                self.handler.handle_sync_message(sync_msg).await;
+                return;
+            }
+        }
+
+        // Try to parse as DeviceMessage
+        if channel.contains(".devices") {
+            if let Ok(device_msg) = serde_json::from_value::<DeviceMessage>(message.clone()) {
+                self.handler.handle_device_message(device_msg).await;
+                return;
+            }
+        }
+
+        // Fall back to raw handler
+        self.handler.handle_raw_message(channel, message).await;
+    }
+}
+
+/// PubNub subscribe response structure
+#[derive(Debug, Deserialize)]
+struct SubscribeResponse {
+    #[serde(rename = "t")]
+    timetoken: Timetoken,
+    #[serde(rename = "m", default)]
+    messages: Vec<serde_json::Value>,
+    #[serde(default)]
+    channels: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Timetoken {
+    t: String,
+    r: Option<u32>,
 }

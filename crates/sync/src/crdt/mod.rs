@@ -6,5 +6,5 @@ pub mod lww_register;
 pub mod or_set;
 
 pub use hlc::{HybridLogicalClock, HLCTimestamp};
-pub use lww_register::LWWRegister;
-pub use or_set::{ORSet, ORSetEntry};
+pub use lww_register::{LWWRegister, PlaybackPosition, PlaybackState};
+pub use or_set::{ORSet, ORSetEntry, ORSetDelta, ORSetOperation};

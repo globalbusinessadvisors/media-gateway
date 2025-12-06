@@ -161,7 +161,7 @@ impl Default for Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        dotenv::dotenv().ok();
+        dotenvy::dotenv().ok();
 
         let mut config = Config::default();
 

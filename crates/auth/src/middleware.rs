@@ -5,13 +5,14 @@ use crate::{
     session::SessionManager,
 };
 use actix_web::{
-    dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
+    dev::{Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpMessage,
 };
 use futures_util::future::LocalBoxFuture;
 use std::{
     future::{ready, Ready},
     rc::Rc,
+    task::{Context, Poll},
 };
 
 /// User context extracted from JWT
@@ -115,7 +116,9 @@ where
     type Error = Error;
     type Future = LocalBoxFuture<'static, std::result::Result<Self::Response, Self::Error>>;
 
-    forward_ready!(service);
+    fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        self.service.poll_ready(cx)
+    }
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let jwt_manager = self.jwt_manager.clone();
@@ -130,16 +133,21 @@ where
                 .headers()
                 .get("Authorization")
                 .and_then(|h| h.to_str().ok())
-                .ok_or_else(|| AuthError::InvalidToken("Missing Authorization header".to_string()))?;
+                .ok_or_else(|| {
+                    Error::from(AuthError::InvalidToken("Missing Authorization header".to_string()))
+                })?;
 
-            let token = JwtManager::extract_bearer_token(auth_header)?;
+            let token = JwtManager::extract_bearer_token(auth_header)
+                .map_err(|e| Error::from(e))?;
 
             // Verify JWT
-            let claims = jwt_manager.verify_access_token(token)?;
+            let claims = jwt_manager.verify_access_token(token)
+                .map_err(|e| Error::from(e))?;
 
             // Check if token is revoked
-            if session_manager.is_token_revoked(&claims.jti).await? {
-                return Err(AuthError::InvalidToken("Token revoked".to_string()).into());
+            if session_manager.is_token_revoked(&claims.jti).await
+                .map_err(|e| Error::from(e))? {
+                return Err(Error::from(AuthError::InvalidToken("Token revoked".to_string())));
             }
 
             // Create user context
@@ -147,7 +155,8 @@ where
 
             // Check required permission if specified
             if let Some(permission) = required_permission {
-                rbac_manager.require_permission(&user_context.roles, &permission)?;
+                rbac_manager.require_permission(&user_context.roles, &permission)
+                    .map_err(|e| Error::from(e))?;
             }
 
             // Insert user context into request extensions

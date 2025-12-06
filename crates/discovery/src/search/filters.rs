@@ -28,7 +28,7 @@ impl SearchFilters {
     /// Build SQL WHERE clause for filters
     pub fn to_sql_where_clause(&self) -> (String, Vec<String>) {
         let mut conditions = Vec::new();
-        let mut params: Vec<String> = Vec::new();
+        let params: Vec<String> = Vec::new();
 
         // Genre filter
         if !self.genres.is_empty() {

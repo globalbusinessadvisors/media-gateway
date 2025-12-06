@@ -22,13 +22,13 @@ impl KeywordSearch {
         // Define schema
         let mut schema_builder = Schema::builder();
 
-        let id_field = schema_builder.add_text_field("id", STRING | STORED);
-        let title_field = schema_builder.add_text_field("title", TEXT | STORED);
-        let overview_field = schema_builder.add_text_field("overview", TEXT | STORED);
-        let genres_field = schema_builder.add_text_field("genres", STRING | STORED);
-        let platforms_field = schema_builder.add_text_field("platforms", STRING | STORED);
-        let release_year_field = schema_builder.add_i64_field("release_year", INDEXED | STORED);
-        let popularity_field = schema_builder.add_f64_field("popularity_score", INDEXED | STORED);
+        let _id_field = schema_builder.add_text_field("id", STRING | STORED);
+        let _title_field = schema_builder.add_text_field("title", TEXT | STORED);
+        let _overview_field = schema_builder.add_text_field("overview", TEXT | STORED);
+        let _genres_field = schema_builder.add_text_field("genres", STRING | STORED);
+        let _platforms_field = schema_builder.add_text_field("platforms", STRING | STORED);
+        let _release_year_field = schema_builder.add_i64_field("release_year", INDEXED | STORED);
+        let _popularity_field = schema_builder.add_f64_field("popularity_score", INDEXED | STORED);
 
         let schema = schema_builder.build();
 
@@ -60,7 +60,7 @@ impl KeywordSearch {
         let reader = self
             .index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommit)
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
 
         let searcher = reader.searcher();
@@ -83,45 +83,64 @@ impl KeywordSearch {
         let mut results = Vec::new();
 
         for (_score, doc_address) in top_docs {
-            let retrieved_doc = searcher.doc(doc_address)?;
+            let retrieved_doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
 
             let id_str = retrieved_doc
                 .get_first(self.schema.get_field("id").unwrap())
-                .and_then(|v| v.as_text())
+                .and_then(|v| match v {
+                    tantivy::schema::OwnedValue::Str(s) => Some(s.as_str()),
+                    _ => None,
+                })
                 .unwrap_or("");
 
             let id = Uuid::parse_str(id_str)?;
 
             let title = retrieved_doc
                 .get_first(self.schema.get_field("title").unwrap())
-                .and_then(|v| v.as_text())
-                .unwrap_or("")
-                .to_string();
+                .and_then(|v| match v {
+                    tantivy::schema::OwnedValue::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
 
             let overview = retrieved_doc
                 .get_first(self.schema.get_field("overview").unwrap())
-                .and_then(|v| v.as_text())
-                .unwrap_or("")
-                .to_string();
+                .and_then(|v| match v {
+                    tantivy::schema::OwnedValue::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
 
             let release_year = retrieved_doc
                 .get_first(self.schema.get_field("release_year").unwrap())
-                .and_then(|v| v.as_i64())
+                .and_then(|v| match v {
+                    tantivy::schema::OwnedValue::I64(i) => Some(*i),
+                    _ => None,
+                })
                 .unwrap_or(0) as i32;
 
             let genres: Vec<String> = retrieved_doc
                 .get_all(self.schema.get_field("genres").unwrap())
-                .filter_map(|v| v.as_text().map(String::from))
+                .filter_map(|v| match v {
+                    tantivy::schema::OwnedValue::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
                 .collect();
 
             let platforms: Vec<String> = retrieved_doc
                 .get_all(self.schema.get_field("platforms").unwrap())
-                .filter_map(|v| v.as_text().map(String::from))
+                .filter_map(|v| match v {
+                    tantivy::schema::OwnedValue::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
                 .collect();
 
             let popularity_score = retrieved_doc
                 .get_first(self.schema.get_field("popularity_score").unwrap())
-                .and_then(|v| v.as_f64())
+                .and_then(|v| match v {
+                    tantivy::schema::OwnedValue::F64(f) => Some(*f),
+                    _ => None,
+                })
                 .unwrap_or(0.0) as f32;
 
             let content = ContentSummary {
@@ -192,7 +211,7 @@ impl KeywordSearch {
     pub fn index_document(&self, content: &ContentSummary) -> anyhow::Result<()> {
         let mut index_writer = self.index.writer(50_000_000)?;
 
-        let mut doc = Document::default();
+        let mut doc = tantivy::TantivyDocument::default();
 
         doc.add_text(
             self.schema.get_field("id").unwrap(),

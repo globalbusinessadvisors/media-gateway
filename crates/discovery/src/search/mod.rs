@@ -7,9 +7,12 @@ pub mod filters;
 pub mod keyword;
 pub mod vector;
 
+pub use filters::SearchFilters;
+pub use keyword::KeywordSearch;
+pub use vector::VectorSearch;
+
 use crate::config::DiscoveryConfig;
 use crate::intent::{IntentParser, ParsedIntent};
-use filters::SearchFilters;
 
 /// Hybrid search service orchestrator
 pub struct HybridSearchService {
@@ -53,7 +56,7 @@ pub struct SearchResult {
 }
 
 /// Content summary for search results
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ContentSummary {
     pub id: Uuid,
     pub title: String,
@@ -133,7 +136,7 @@ impl HybridSearchService {
         &self,
         query: &str,
         filters: Option<SearchFilters>,
-        limit: Option<usize>,
+        _limit: Option<usize>,
     ) -> anyhow::Result<Vec<SearchResult>> {
         self.vector_search.search(query, filters).await
     }
@@ -143,15 +146,14 @@ impl HybridSearchService {
         &self,
         query: &str,
         filters: Option<SearchFilters>,
-        limit: Option<usize>,
+        _limit: Option<usize>,
     ) -> anyhow::Result<Vec<SearchResult>> {
         self.keyword_search.search(query, filters).await
     }
 
     /// Get content by ID
     pub async fn get_content_by_id(&self, id: Uuid) -> anyhow::Result<Option<ContentSummary>> {
-        let result = sqlx::query_as!(
-            ContentSummary,
+        let result = sqlx::query_as::<_, ContentSummary>(
             r#"
             SELECT
                 id,
@@ -159,13 +161,13 @@ impl HybridSearchService {
                 overview,
                 release_year,
                 genres,
-                ARRAY[]::text[] as platforms,
+                ARRAY[]::text[] as "platforms!: Vec<String>",
                 popularity_score
             FROM content
             WHERE id = $1
-            "#,
-            id
+            "#
         )
+        .bind(id)
         .fetch_optional(&self.db_pool)
         .await?;
 

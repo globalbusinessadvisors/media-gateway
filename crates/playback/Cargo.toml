@@ -16,6 +16,7 @@ media-gateway-core = { workspace = true }
 
 # HTTP
 actix-web = { workspace = true }
+actix-rt = { workspace = true }
 
 # Async
 tokio = { workspace = true }
@@ -27,6 +28,12 @@ redis = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
 
 # Observability
 tracing = { workspace = true }

@@ -45,16 +45,9 @@ impl ApiRateLimiter {
     /// Check rate limit and wait if necessary
     async fn check_and_wait(&self) -> Result<()> {
         // Try to acquire permit with jitter to avoid thundering herd
-        match self.limiter.until_ready_with_jitter(Jitter::up_to(Duration::from_millis(100))).await {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                warn!("Rate limit exceeded, waiting...");
-                // This shouldn't happen with until_ready, but handle just in case
-                Err(IngestionError::RateLimitExceeded {
-                    platform: "unknown".to_string(),
-                })
-            }
-        }
+        // until_ready_with_jitter returns () not Result, it always waits until ready
+        self.limiter.until_ready_with_jitter(Jitter::up_to(Duration::from_millis(100))).await;
+        Ok(())
     }
 }
 

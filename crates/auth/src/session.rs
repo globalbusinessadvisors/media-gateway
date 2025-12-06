@@ -3,7 +3,7 @@ use redis::{AsyncCommands, Client};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const SESSION_TTL: usize = 7 * 24 * 3600; // 7 days
+const SESSION_TTL: u64 = 7 * 24 * 3600; // 7 days
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -77,7 +77,7 @@ impl SessionManager {
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to index session: {}", e)))?;
 
-        conn.expire(&user_sessions_key, SESSION_TTL)
+        conn.expire(&user_sessions_key, SESSION_TTL as i64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to set expiry: {}", e)))?;
 
@@ -181,7 +181,7 @@ impl SessionManager {
     }
 
     /// Mark a token as revoked
-    pub async fn revoke_token(&self, jti: &str, ttl: usize) -> Result<()> {
+    pub async fn revoke_token(&self, jti: &str, ttl: u64) -> Result<()> {
         let mut conn = self.get_connection().await?;
 
         let revoked_key = format!("revoked:{}", jti);

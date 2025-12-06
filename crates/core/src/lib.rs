@@ -11,8 +11,12 @@
 //! - `models`: Domain models for content, users, and search
 //! - `error`: Error types and handling
 //! - `validation`: Validation utilities and functions
+//! - `database`: Shared PostgreSQL connection pool
+//! - `math`: Mathematical utilities for vector operations
 
+pub mod database;
 pub mod error;
+pub mod math;
 pub mod models;
 pub mod types;
 pub mod validation;
@@ -21,7 +25,9 @@ pub mod validation;
 mod tests;
 
 // Re-export commonly used types
+pub use database::{DatabaseConfig, DatabasePool, PoolStats};
 pub use error::MediaGatewayError;
+pub use math::{cosine_similarity, dot_product, l2_distance, normalize_vector};
 pub use models::{content, search, user};
 pub use types::*;
 
