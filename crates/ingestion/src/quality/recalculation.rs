@@ -45,7 +45,26 @@ impl RecalculationJob {
     }
 
     async fn fetch_all_content(&self) -> Result<Vec<(CanonicalContent, DateTime<Utc>)>, RecalculationError> {
-        let rows = sqlx::query!(
+        #[derive(sqlx::FromRow)]
+        struct ContentRow {
+            platform_id: String,
+            platform_content_id: String,
+            title: String,
+            content_type: String,
+            overview: Option<String>,
+            release_year: Option<i32>,
+            runtime_minutes: Option<i32>,
+            user_rating: Option<f64>,
+            genres: serde_json::Value,
+            images: serde_json::Value,
+            external_ids: serde_json::Value,
+            availability: serde_json::Value,
+            updated_at: DateTime<Utc>,
+            entity_id: Option<String>,
+            embedding: Option<serde_json::Value>,
+        }
+
+        let rows: Vec<ContentRow> = sqlx::query_as(
             r#"
             SELECT
                 platform_id,
@@ -141,16 +160,16 @@ impl RecalculationJob {
     ) -> Result<(), RecalculationError> {
         let new_score = self.scorer.score_content_with_freshness(content, last_updated);
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE content
             SET quality_score = $1
             WHERE platform_id = $2 AND platform_content_id = $3
-            "#,
-            new_score,
-            content.platform_id,
-            content.platform_content_id
+            "#
         )
+        .bind(new_score)
+        .bind(&content.platform_id)
+        .bind(&content.platform_content_id)
         .execute(&self.pool)
         .await
         .map_err(|e| RecalculationError::DatabaseError(e.to_string()))?;
@@ -191,7 +210,26 @@ impl RecalculationJob {
     }
 
     async fn fetch_outdated_content(&self, threshold_date: DateTime<Utc>) -> Result<Vec<(CanonicalContent, DateTime<Utc>)>, RecalculationError> {
-        let rows = sqlx::query!(
+        #[derive(sqlx::FromRow)]
+        struct ContentRow {
+            platform_id: String,
+            platform_content_id: String,
+            title: String,
+            content_type: String,
+            overview: Option<String>,
+            release_year: Option<i32>,
+            runtime_minutes: Option<i32>,
+            user_rating: Option<f64>,
+            genres: serde_json::Value,
+            images: serde_json::Value,
+            external_ids: serde_json::Value,
+            availability: serde_json::Value,
+            updated_at: DateTime<Utc>,
+            entity_id: Option<String>,
+            embedding: Option<serde_json::Value>,
+        }
+
+        let rows: Vec<ContentRow> = sqlx::query_as(
             r#"
             SELECT
                 platform_id,
@@ -213,9 +251,9 @@ impl RecalculationJob {
             WHERE deleted_at IS NULL
               AND updated_at < $1
             ORDER BY updated_at ASC
-            "#,
-            threshold_date
+            "#
         )
+        .bind(threshold_date)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| RecalculationError::DatabaseError(e.to_string()))?;

@@ -281,9 +281,13 @@ impl QdrantClient {
             .collect();
         payload_map.insert(
             "genres".to_string(),
-            QdrantValue::from(qdrant_client::qdrant::ListValue {
-                values: genre_values,
-            }),
+            QdrantValue {
+                kind: Some(qdrant_client::qdrant::value::Kind::ListValue(
+                    qdrant_client::qdrant::ListValue {
+                        values: genre_values,
+                    }
+                )),
+            },
         );
 
         Ok(PointStruct::new(
@@ -324,7 +328,13 @@ impl QdrantClient {
             .result
             .into_iter()
             .filter_map(|point| {
-                let id = Uuid::parse_str(&point.id?.to_string()).ok()?;
+                let point_id = point.id?;
+                let id_str = match point_id {
+                    qdrant_client::qdrant::PointId { point_id_options: Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(uuid_str)) } => uuid_str,
+                    qdrant_client::qdrant::PointId { point_id_options: Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(num)) } => num.to_string(),
+                    _ => return None,
+                };
+                let id = Uuid::parse_str(&id_str).ok()?;
                 Some((id, point.score))
             })
             .collect();

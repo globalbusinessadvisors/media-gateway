@@ -78,7 +78,7 @@ impl CommandRouter {
         device: &DeviceInfo,
     ) -> Result<(), CommandError> {
         match command_type {
-            CommandType::Cast { target_device_id } => {
+            CommandType::CastTo { target_device_id, .. } => {
                 // Check if source device can cast
                 if !device.capabilities.can_cast {
                     return Err(CommandError::NotSupported);
@@ -528,7 +528,7 @@ mod tests {
         router.device_registry.register_device(device);
 
         let command = Command::new(
-            CommandType::Cast {
+            CommandType::CastTo {
                 target_device_id: "device-2".to_string(),
                 content_id: "movie-123".to_string(),
             },
@@ -553,7 +553,7 @@ mod tests {
         router.device_registry.register_device(target);
 
         let command = Command::new(
-            CommandType::Cast {
+            CommandType::CastTo {
                 target_device_id: "device-2".to_string(),
                 content_id: "movie-123".to_string(),
             },

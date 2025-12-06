@@ -17,9 +17,19 @@
 //!
 //! ## Protocol Support
 //!
-//! - Transport: HTTP/SSE (Server-Sent Events)
+//! - Transport: HTTP/SSE (Server-Sent Events) and STDIO
 //! - Protocol Version: MCP 1.0
 //! - JSON-RPC Version: 2.0
+//!
+//! ## Transport Modes
+//!
+//! ### HTTP Transport (Default)
+//! Standard HTTP server with Server-Sent Events for real-time updates.
+//! Suitable for web-based integrations and testing.
+//!
+//! ### STDIO Transport
+//! Line-delimited JSON-RPC over standard input/output.
+//! Required for Claude Desktop integration and command-line MCP clients.
 
 use sqlx::PgPool;
 
@@ -27,6 +37,7 @@ pub mod handlers;
 pub mod protocol;
 pub mod resources;
 pub mod tools;
+pub mod transport;
 
 /// MCP Server state shared across handlers
 pub struct McpServerState {

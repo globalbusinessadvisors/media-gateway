@@ -182,8 +182,11 @@ impl PostgresSyncRepository {
     // Helper: Deserialize HLCTimestamp
     fn deserialize_hlc_timestamp(value: serde_json::Value) -> HLCTimestamp {
         let physical = value["physical"].as_u64().unwrap_or(0);
-        let logical = value["logical"].as_u64().unwrap_or(0) as u32;
-        HLCTimestamp::from_components(physical, logical)
+        let logical = value["logical"].as_u64().unwrap_or(0);
+        HLCTimestamp::from_components(
+            physical.try_into().expect("physical timestamp overflow"),
+            logical.try_into().expect("logical counter overflow")
+        )
     }
 }
 

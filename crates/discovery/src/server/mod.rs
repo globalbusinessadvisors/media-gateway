@@ -41,7 +41,28 @@ async fn health() -> impl Responder {
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/v1")
-            .route("/health", web::get().to(health)),
+            .route("/health", web::get().to(health))
+            // Search routes
+            .route("/search", web::post().to(handlers::execute_search))
+            .route("/search/autocomplete", web::get().to(handlers::autocomplete))
+            // Analytics routes
+            .route("/analytics", web::get().to(handlers::get_analytics))
+            // Quality routes
+            .service(
+                web::scope("/quality")
+                    .route("/report", web::get().to(handlers::get_quality_report))
+            )
+            // Admin ranking routes
+            .service(
+                web::scope("/admin/search/ranking")
+                    .route("", web::get().to(handlers::get_ranking_config))
+                    .route("", web::put().to(handlers::update_ranking_config))
+                    .route("/variants", web::get().to(handlers::list_ranking_variants))
+                    .route("/variants/{name}", web::get().to(handlers::get_ranking_variant))
+                    .route("/variants/{name}", web::put().to(handlers::update_ranking_variant))
+                    .route("/variants/{name}", web::delete().to(handlers::delete_ranking_variant))
+                    .route("/history/{version}", web::get().to(handlers::get_ranking_config_history))
+            )
     );
 
     // Configure catalog routes

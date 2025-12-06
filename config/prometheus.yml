@@ -5,6 +5,10 @@ global:
     cluster: 'media-gateway-local'
     environment: 'development'
 
+# Alert rule files
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:

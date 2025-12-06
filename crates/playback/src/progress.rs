@@ -50,8 +50,7 @@ impl ProgressRepository {
         &self,
         request: UpdateProgressRequest,
     ) -> Result<ProgressRecord, ProgressError> {
-        let record = sqlx::query_as!(
-            ProgressRecord,
+        let record = sqlx::query_as::<_, ProgressRecord>(
             r#"
             INSERT INTO playback_progress (
                 user_id, content_id, platform_id, progress_seconds,
@@ -68,14 +67,14 @@ impl ProgressRepository {
                 id, user_id, content_id, platform_id, progress_seconds,
                 duration_seconds, progress_percentage, last_position_ms,
                 is_completed, device_id, created_at, updated_at
-            "#,
-            request.user_id,
-            request.content_id,
-            request.platform_id,
-            request.progress_seconds,
-            request.duration_seconds,
-            request.device_id
+            "#
         )
+        .bind(request.user_id)
+        .bind(request.content_id)
+        .bind(request.platform_id)
+        .bind(request.progress_seconds)
+        .bind(request.duration_seconds)
+        .bind(request.device_id)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| ProgressError::Database(e.to_string()))?;
@@ -90,8 +89,7 @@ impl ProgressRepository {
         content_id: Uuid,
         platform_id: &str,
     ) -> Result<Option<ProgressRecord>, ProgressError> {
-        let record = sqlx::query_as!(
-            ProgressRecord,
+        let record = sqlx::query_as::<_, ProgressRecord>(
             r#"
             SELECT
                 id, user_id, content_id, platform_id, progress_seconds,
@@ -99,11 +97,11 @@ impl ProgressRepository {
                 is_completed, device_id, created_at, updated_at
             FROM playback_progress
             WHERE user_id = $1 AND content_id = $2 AND platform_id = $3
-            "#,
-            user_id,
-            content_id,
-            platform_id
+            "#
         )
+        .bind(user_id)
+        .bind(content_id)
+        .bind(platform_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| ProgressError::Database(e.to_string()))?;
@@ -117,8 +115,7 @@ impl ProgressRepository {
         user_id: Uuid,
         limit: i64,
     ) -> Result<Vec<ProgressRecord>, ProgressError> {
-        let records = sqlx::query_as!(
-            ProgressRecord,
+        let records = sqlx::query_as::<_, ProgressRecord>(
             r#"
             SELECT
                 id, user_id, content_id, platform_id, progress_seconds,
@@ -128,10 +125,10 @@ impl ProgressRepository {
             WHERE user_id = $1 AND is_completed = false
             ORDER BY updated_at DESC
             LIMIT $2
-            "#,
-            user_id,
-            limit
+            "#
         )
+        .bind(user_id)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ProgressError::Database(e.to_string()))?;
@@ -145,8 +142,7 @@ impl ProgressRepository {
         user_id: Uuid,
         limit: i64,
     ) -> Result<Vec<ProgressRecord>, ProgressError> {
-        let records = sqlx::query_as!(
-            ProgressRecord,
+        let records = sqlx::query_as::<_, ProgressRecord>(
             r#"
             SELECT
                 id, user_id, content_id, platform_id, progress_seconds,
@@ -156,10 +152,10 @@ impl ProgressRepository {
             WHERE user_id = $1
             ORDER BY updated_at DESC
             LIMIT $2
-            "#,
-            user_id,
-            limit
+            "#
         )
+        .bind(user_id)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ProgressError::Database(e.to_string()))?;
@@ -169,14 +165,14 @@ impl ProgressRepository {
 
     /// Delete stale progress (older than 30 days and completed)
     pub async fn cleanup_stale_progress(&self, days: i32) -> Result<u64, ProgressError> {
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"
             DELETE FROM playback_progress
             WHERE updated_at < NOW() - INTERVAL '1 day' * $1
             AND is_completed = true
-            "#,
-            days
+            "#
         )
+        .bind(days)
         .execute(&self.pool)
         .await
         .map_err(|e| ProgressError::Database(e.to_string()))?;
@@ -191,16 +187,16 @@ impl ProgressRepository {
         content_id: Uuid,
         platform_id: &str,
     ) -> Result<(), ProgressError> {
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE playback_progress
             SET is_completed = true, updated_at = NOW()
             WHERE user_id = $1 AND content_id = $2 AND platform_id = $3
-            "#,
-            user_id,
-            content_id,
-            platform_id
+            "#
         )
+        .bind(user_id)
+        .bind(content_id)
+        .bind(platform_id)
         .execute(&self.pool)
         .await
         .map_err(|e| ProgressError::Database(e.to_string()))?;
@@ -215,15 +211,15 @@ impl ProgressRepository {
         content_id: Uuid,
         platform_id: &str,
     ) -> Result<(), ProgressError> {
-        sqlx::query!(
+        sqlx::query(
             r#"
             DELETE FROM playback_progress
             WHERE user_id = $1 AND content_id = $2 AND platform_id = $3
-            "#,
-            user_id,
-            content_id,
-            platform_id
+            "#
         )
+        .bind(user_id)
+        .bind(content_id)
+        .bind(platform_id)
         .execute(&self.pool)
         .await
         .map_err(|e| ProgressError::Database(e.to_string()))?;
@@ -267,7 +263,7 @@ mod tests {
     }
 
     async fn cleanup_test_data(pool: &PgPool, user_id: Uuid) {
-        sqlx::query!("DELETE FROM playback_progress WHERE user_id = $1", user_id)
+        sqlx::query("DELETE FROM playback_progress WHERE user_id = $1").bind(user_id)
             .execute(pool)
             .await
             .ok();
@@ -437,10 +433,10 @@ mod tests {
 
         repo.upsert_progress(request).await.unwrap();
 
-        sqlx::query!(
-            "UPDATE playback_progress SET updated_at = NOW() - INTERVAL '31 days' WHERE user_id = $1",
-            user_id
+        sqlx::query(
+            "UPDATE playback_progress SET updated_at = NOW() - INTERVAL '31 days' WHERE user_id = $1"
         )
+        .bind(user_id)
         .execute(&pool)
         .await
         .unwrap();

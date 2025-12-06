@@ -23,7 +23,7 @@ impl TotpManager {
     }
 
     pub fn generate_secret(&self, user_id: &str) -> Result<(String, String)> {
-        let secret = Secret::generate_secret();
+        let secret = Secret::default();
         let secret_base32 = secret.to_encoded().to_string();
 
         let totp = TOTP::new(

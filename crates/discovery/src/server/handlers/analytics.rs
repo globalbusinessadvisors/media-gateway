@@ -1,10 +1,7 @@
-use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    Json,
-};
+use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::{error, info};
 
 use crate::analytics::{SearchAnalytics, AnalyticsDashboard};
 
@@ -34,7 +31,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-/// Get search analytics dashboard data
+/// GET /api/v1/analytics - Get search analytics dashboard data
 ///
 /// Returns comprehensive analytics including:
 /// - Total searches and unique queries
@@ -43,22 +40,29 @@ pub struct ErrorResponse {
 /// - Click-through rate
 /// - Top performing queries
 /// - Zero-result queries for content gap analysis
+///
+/// Query parameters:
+/// - period: Time period ("1h", "24h", "7d", "30d", default: "24h")
+/// - limit: Limit for top queries (default: 10)
 pub async fn get_analytics(
-    State(analytics): State<Arc<SearchAnalytics>>,
-    Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<AnalyticsDashboard>, (StatusCode, Json<ErrorResponse>)> {
-    analytics
-        .get_dashboard(&params.period, params.limit)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to get analytics: {}", e),
-                }),
-            )
-        })
+    analytics: web::Data<Arc<SearchAnalytics>>,
+    params: web::Query<AnalyticsQuery>,
+) -> impl Responder {
+    info!(
+        period = %params.period,
+        limit = %params.limit,
+        "Fetching analytics dashboard"
+    );
+
+    match analytics.get_dashboard(&params.period, params.limit).await {
+        Ok(dashboard) => HttpResponse::Ok().json(dashboard),
+        Err(e) => {
+            error!(error = %e, "Failed to get analytics");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to get analytics: {}", e),
+            })
+        }
+    }
 }
 
 #[cfg(test)]

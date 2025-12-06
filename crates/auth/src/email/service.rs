@@ -96,7 +96,7 @@ impl EmailManager {
         let token_data = serde_json::to_string(&token)
             .map_err(|e| EmailError::Template(e.to_string()))?;
 
-        conn.set_ex(&key, token_data, ttl as u64).await?;
+        conn.set_ex::<_, _, ()>(&key, token_data, ttl as u64).await?;
 
         Ok(token)
     }
@@ -113,7 +113,7 @@ impl EmailManager {
                     .map_err(|e| EmailError::Template(e.to_string()))?;
 
                 // Delete token after verification
-                conn.del(&key).await?;
+                conn.del::<_, ()>(&key).await?;
 
                 Ok(verification_token)
             }
@@ -131,7 +131,7 @@ impl EmailManager {
             Err(EmailError::RateLimitExceeded)
         } else {
             // Set rate limit: 1 per minute
-            conn.set_ex(&key, "1", 60).await?;
+            conn.set_ex::<_, _, ()>(&key, "1", 60).await?;
             Ok(true)
         }
     }

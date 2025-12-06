@@ -1,8 +1,4 @@
-use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    Json,
-};
+use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info};
@@ -51,7 +47,7 @@ pub struct LowQualityItemResponse {
     pub content_type: String,
 }
 
-/// GET /api/v1/admin/content/quality-report
+/// GET /api/v1/quality/report - Get quality report
 ///
 /// Returns a list of low-quality content items below the specified threshold.
 /// Used by administrators to identify content that needs metadata enrichment.
@@ -60,25 +56,30 @@ pub struct LowQualityItemResponse {
 /// - threshold: Quality score threshold (0.0-1.0, default: 0.6)
 /// - limit: Maximum number of items to return (default: 100)
 pub async fn get_quality_report(
-    State(pool): State<sqlx::PgPool>,
-    Query(params): Query<QualityReportQuery>,
-) -> Result<Json<QualityReportResponse>, StatusCode> {
+    pool: web::Data<sqlx::PgPool>,
+    params: web::Query<QualityReportQuery>,
+) -> impl Responder {
     info!(
         "Fetching quality report with threshold={}, limit={}",
         params.threshold, params.limit
     );
 
     // Create repository
-    let repository = PostgresContentRepository::new(pool);
+    let repository = PostgresContentRepository::new(pool.get_ref().clone());
 
     // Fetch low-quality content
-    let low_quality_items = repository
+    let low_quality_items = match repository
         .find_low_quality_content(params.threshold, params.limit)
         .await
-        .map_err(|e| {
+    {
+        Ok(items) => items,
+        Err(e) => {
             error!("Failed to fetch low-quality content: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch low-quality content: {}", e)
+            }));
+        }
+    };
 
     // Convert to response format with missing fields analysis
     let scorer = QualityScorer::default();
@@ -103,11 +104,11 @@ pub async fn get_quality_report(
         params.threshold
     );
 
-    Ok(Json(QualityReportResponse {
+    HttpResponse::Ok().json(QualityReportResponse {
         total_low_quality: response_items.len(),
         threshold: params.threshold,
         low_quality_items: response_items,
-    }))
+    })
 }
 
 /// Identify missing fields for a content item

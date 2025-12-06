@@ -12,6 +12,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 /// Helper function to create test app
 async fn create_test_app(db_pool: PgPool) -> Router {
@@ -129,6 +130,7 @@ async fn test_tools_list(pool: PgPool) {
     assert!(tool_names.contains(&"check_availability"));
     assert!(tool_names.contains(&"get_content_details"));
     assert!(tool_names.contains(&"sync_watchlist"));
+    assert!(tool_names.contains(&"list_devices"));
 }
 
 #[sqlx::test]
@@ -245,4 +247,100 @@ async fn test_prompts_get(pool: PgPool) {
     let text = response["result"]["text"].as_str().unwrap();
     assert!(text.contains("sci-fi"));
     assert!(text.contains("exciting"));
+}
+
+#[sqlx::test(fixtures("test_devices"))]
+async fn test_list_devices_tool(pool: PgPool) {
+    let app = create_test_app(pool).await;
+
+    // Get the test user ID from the fixture
+    let user_id = "123e4567-e89b-12d3-a456-426614174000"; // Test user ID from fixture
+
+    let params = json!({
+        "name": "list_devices",
+        "arguments": {
+            "user_id": user_id
+        }
+    });
+
+    let (status, response) = send_jsonrpc_request(app, "tools/call", Some(params)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert!(response["result"].is_object());
+    assert!(response["result"]["content"].is_array());
+    assert_eq!(response["result"]["is_error"], false);
+
+    // Parse the text content to verify device information
+    let content = response["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 1);
+
+    let text_content = &content[0];
+    assert_eq!(text_content["type"], "text");
+
+    let text = text_content["text"].as_str().unwrap();
+    let device_data: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(device_data["user_id"], user_id);
+    assert!(device_data["device_count"].is_number());
+    assert!(device_data["devices"].is_array());
+
+    let devices = device_data["devices"].as_array().unwrap();
+    if !devices.is_empty() {
+        let first_device = &devices[0];
+        assert!(first_device["device_id"].is_string());
+        assert!(first_device["device_type"].is_string());
+        assert!(first_device["platform"].is_string());
+        assert!(first_device["capabilities"].is_object());
+        assert!(first_device["last_seen"].is_string());
+        assert!(first_device["is_online"].is_boolean());
+    }
+}
+
+#[sqlx::test]
+async fn test_list_devices_tool_empty(pool: PgPool) {
+    let app = create_test_app(pool).await;
+
+    // Use a random UUID that shouldn't have any devices
+    let user_id = Uuid::new_v4().to_string();
+
+    let params = json!({
+        "name": "list_devices",
+        "arguments": {
+            "user_id": user_id
+        }
+    });
+
+    let (status, response) = send_jsonrpc_request(app, "tools/call", Some(params)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert!(response["result"].is_object());
+    assert!(response["result"]["content"].is_array());
+
+    // Parse the response
+    let content = response["result"]["content"].as_array().unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    let device_data: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    assert_eq!(device_data["device_count"], 0);
+    assert_eq!(device_data["devices"].as_array().unwrap().len(), 0);
+}
+
+#[sqlx::test]
+async fn test_list_devices_tool_invalid_uuid(pool: PgPool) {
+    let app = create_test_app(pool).await;
+
+    let params = json!({
+        "name": "list_devices",
+        "arguments": {
+            "user_id": "invalid-uuid"
+        }
+    });
+
+    let (status, response) = send_jsonrpc_request(app, "tools/call", Some(params)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(response["error"].is_object());
+    assert_eq!(response["error"]["code"], -32602); // Invalid params
 }

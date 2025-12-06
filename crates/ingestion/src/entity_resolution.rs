@@ -92,7 +92,15 @@ impl EntityResolver {
     async fn load_from_database(&self) -> Result<()> {
         info!("Loading entity mappings from database");
 
-        let mappings = sqlx::query!(
+        #[derive(sqlx::FromRow)]
+        struct EntityMapping {
+            external_id: String,
+            id_type: String,
+            entity_id: String,
+            confidence: f64,
+        }
+
+        let mappings: Vec<EntityMapping> = sqlx::query_as(
             r#"
             SELECT external_id, id_type, entity_id, confidence
             FROM entity_mappings
@@ -142,7 +150,7 @@ impl EntityResolver {
         entity_id: &str,
         confidence: f32,
     ) -> Result<()> {
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO entity_mappings (external_id, id_type, entity_id, confidence)
             VALUES ($1, $2, $3, $4)
@@ -150,12 +158,12 @@ impl EntityResolver {
             SET entity_id = EXCLUDED.entity_id,
                 confidence = EXCLUDED.confidence,
                 updated_at = NOW()
-            "#,
-            external_id,
-            id_type,
-            entity_id,
-            confidence as f64
+            "#
         )
+        .bind(external_id)
+        .bind(id_type)
+        .bind(entity_id)
+        .bind(confidence as f64)
         .execute(&self.pool)
         .await
         .map_err(|e| IngestionError::DatabaseError(e.to_string()))?;

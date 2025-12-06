@@ -67,23 +67,23 @@ impl QueryLog {
         let user_id_hash = user_id.map(Self::anonymize_user_id);
         let filters_json = serde_json::to_value(filters).unwrap_or(serde_json::json!({}));
 
-        let result = sqlx::query!(
+        let result: (Uuid,) = sqlx::query_as(
             r#"
             INSERT INTO search_events (query_hash, query_text, user_id_hash, result_count, latency_ms, filters_applied)
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id
-            "#,
-            query_hash,
-            query,
-            user_id_hash,
-            result_count,
-            latency_ms,
-            filters_json
+            "#
         )
+        .bind(query_hash)
+        .bind(query)
+        .bind(user_id_hash)
+        .bind(result_count)
+        .bind(latency_ms)
+        .bind(filters_json)
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(result.id)
+        Ok(result.0)
     }
 
     /// Log a click on a search result
@@ -93,20 +93,20 @@ impl QueryLog {
         content_id: Uuid,
         position: i32,
     ) -> Result<Uuid, sqlx::Error> {
-        let result = sqlx::query!(
+        let result: (Uuid,) = sqlx::query_as(
             r#"
             INSERT INTO search_clicks (search_event_id, content_id, position)
             VALUES ($1, $2, $3)
             RETURNING id
-            "#,
-            search_event_id,
-            content_id,
-            position
+            "#
         )
+        .bind(search_event_id)
+        .bind(content_id)
+        .bind(position)
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(result.id)
+        Ok(result.0)
     }
 
     /// Get recent search events
@@ -114,17 +114,16 @@ impl QueryLog {
         &self,
         limit: i64,
     ) -> Result<Vec<SearchEvent>, sqlx::Error> {
-        sqlx::query_as!(
-            SearchEvent,
+        sqlx::query_as::<_, SearchEvent>(
             r#"
             SELECT id, query_hash, query_text, user_id_hash, result_count, latency_ms,
                    filters_applied, created_at
             FROM search_events
             ORDER BY created_at DESC
             LIMIT $1
-            "#,
-            limit
+            "#
         )
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
     }
@@ -134,16 +133,15 @@ impl QueryLog {
         &self,
         search_event_id: Uuid,
     ) -> Result<Vec<SearchClick>, sqlx::Error> {
-        sqlx::query_as!(
-            SearchClick,
+        sqlx::query_as::<_, SearchClick>(
             r#"
             SELECT id, search_event_id, content_id, position, clicked_at
             FROM search_clicks
             WHERE search_event_id = $1
             ORDER BY clicked_at ASC
-            "#,
-            search_event_id
+            "#
         )
+        .bind(search_event_id)
         .fetch_all(&self.pool)
         .await
     }

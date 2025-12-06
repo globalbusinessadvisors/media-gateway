@@ -52,7 +52,7 @@ impl AuthStorage {
         let value = serde_json::to_string(pkce)
             .map_err(|e| AuthError::Internal(format!("Serialization error: {}", e)))?;
 
-        conn.set_ex(&key, value, PKCE_TTL_SECS)
+        conn.set_ex::<_, _, ()>(&key, value, PKCE_TTL_SECS)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis SET error: {}", e)))?;
 
@@ -82,7 +82,7 @@ impl AuthStorage {
     pub async fn delete_pkce(&self, state: &str) -> Result<()> {
         let mut conn = self.get_conn().await?;
         let key = format!("pkce:{}", state);
-        conn.del(&key)
+        conn.del::<_, ()>(&key)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
         Ok(())
@@ -97,7 +97,7 @@ impl AuthStorage {
         let value = serde_json::to_string(auth_code)
             .map_err(|e| AuthError::Internal(format!("Serialization error: {}", e)))?;
 
-        conn.set_ex(&key, value, AUTH_CODE_TTL_SECS)
+        conn.set_ex::<_, _, ()>(&key, value, AUTH_CODE_TTL_SECS)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis SET error: {}", e)))?;
 
@@ -129,14 +129,14 @@ impl AuthStorage {
         let key = format!("authcode:{}", code);
 
         // Get remaining TTL
-        let ttl: i64 = conn.ttl(&key)
+        let ttl: i64 = conn.ttl::<_, i64>(&key)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis TTL error: {}", e)))?;
 
         if ttl > 0 {
             let value = serde_json::to_string(auth_code)
                 .map_err(|e| AuthError::Internal(format!("Serialization error: {}", e)))?;
-            conn.set_ex(&key, value, ttl as u64)
+            conn.set_ex::<_, _, ()>(&key, value, ttl as u64)
                 .await
                 .map_err(|e| AuthError::Internal(format!("Redis SET error: {}", e)))?;
         }
@@ -148,7 +148,7 @@ impl AuthStorage {
     pub async fn delete_auth_code(&self, code: &str) -> Result<()> {
         let mut conn = self.get_conn().await?;
         let key = format!("authcode:{}", code);
-        conn.del(&key)
+        conn.del::<_, ()>(&key)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
         Ok(())
@@ -165,12 +165,12 @@ impl AuthStorage {
             .map_err(|e| AuthError::Internal(format!("Serialization error: {}", e)))?;
 
         // Store by device_code
-        conn.set_ex(&key, value.clone(), DEVICE_CODE_TTL_SECS)
+        conn.set_ex::<_, _, ()>(&key, value.clone(), DEVICE_CODE_TTL_SECS)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis SET error: {}", e)))?;
 
         // Store mapping from user_code to device_code for approval lookup
-        conn.set_ex(&user_code_key, device_code, DEVICE_CODE_TTL_SECS)
+        conn.set_ex::<_, _, ()>(&user_code_key, device_code, DEVICE_CODE_TTL_SECS)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis SET error: {}", e)))?;
 
@@ -201,14 +201,14 @@ impl AuthStorage {
         let mut conn = self.get_conn().await?;
         let key = format!("devicecode:{}", device_code);
 
-        let ttl: i64 = conn.ttl(&key)
+        let ttl: i64 = conn.ttl::<_, i64>(&key)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis TTL error: {}", e)))?;
 
         if ttl > 0 {
             let value = serde_json::to_string(device)
                 .map_err(|e| AuthError::Internal(format!("Serialization error: {}", e)))?;
-            conn.set_ex(&key, value, ttl as u64)
+            conn.set_ex::<_, _, ()>(&key, value, ttl as u64)
                 .await
                 .map_err(|e| AuthError::Internal(format!("Redis SET error: {}", e)))?;
         }
@@ -239,13 +239,13 @@ impl AuthStorage {
         // Get the device to find user_code for cleanup
         if let Some(device) = self.get_device_code(device_code).await? {
             let user_code_key = format!("devicecode:user:{}", device.user_code);
-            let _: () = conn.del(&user_code_key)
+            let _: () = conn.del::<_, ()>(&user_code_key)
                 .await
                 .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
         }
 
         let key = format!("devicecode:{}", device_code);
-        conn.del(&key)
+        conn.del::<_, ()>(&key)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
         Ok(())
@@ -286,13 +286,13 @@ impl AuthStorage {
         }
 
         // Increment counter
-        let new_count: u32 = conn.incr(&key, 1)
+        let new_count: u32 = conn.incr::<_, _, u32>(&key, 1)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis INCR error: {}", e)))?;
 
         // Set expiry on first attempt
         if new_count == 1 {
-            conn.expire(&key, window_secs)
+            conn.expire::<_, ()>(&key, window_secs)
                 .await
                 .map_err(|e| AuthError::Internal(format!("Redis EXPIRE error: {}", e)))?;
         }
@@ -304,7 +304,7 @@ impl AuthStorage {
     pub async fn reset_mfa_rate_limit(&self, user_id: &str) -> Result<()> {
         let mut conn = self.get_conn().await?;
         let key = format!("mfa:attempts:{}", user_id);
-        conn.del(&key)
+        conn.del::<_, ()>(&key)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
         Ok(())
@@ -319,7 +319,7 @@ impl AuthStorage {
         let value = serde_json::to_string(reset_token)
             .map_err(|e| AuthError::Internal(format!("Serialization error: {}", e)))?;
 
-        conn.set_ex(&key, value, 3600)
+        conn.set_ex::<_, _, ()>(&key, value, 3600)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis SET error: {}", e)))?;
 
@@ -349,7 +349,7 @@ impl AuthStorage {
     pub async fn delete_password_reset_token(&self, token: &str) -> Result<()> {
         let mut conn = self.get_conn().await?;
         let key = format!("password_reset:{}", token);
-        conn.del(&key)
+        conn.del::<_, ()>(&key)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
         Ok(())
@@ -372,12 +372,12 @@ impl AuthStorage {
             return Ok(0);
         }
 
-        let new_count: u32 = conn.incr(&key, 1)
+        let new_count: u32 = conn.incr::<_, _, u32>(&key, 1)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis INCR error: {}", e)))?;
 
         if new_count == 1 {
-            conn.expire(&key, window_secs)
+            conn.expire::<_, ()>(&key, window_secs)
                 .await
                 .map_err(|e| AuthError::Internal(format!("Redis EXPIRE error: {}", e)))?;
         }
@@ -398,7 +398,7 @@ impl AuthStorage {
             .map_err(|e| AuthError::Internal(format!("Redis KEYS error: {}", e)))?;
 
         if !keys.is_empty() {
-            conn.del(keys)
+            conn.del::<_, ()>(keys)
                 .await
                 .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
         }

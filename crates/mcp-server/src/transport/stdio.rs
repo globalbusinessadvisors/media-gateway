@@ -1,39 +1,123 @@
-//! JSON-RPC request handlers
+//! STDIO transport implementation for MCP server
 //!
-//! This module implements the JSON-RPC 2.0 protocol handlers for MCP methods.
+//! This transport layer enables the MCP server to communicate via standard input/output,
+//! which is required for Claude Desktop integration and other MCP clients.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
+use crate::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::McpServerState;
+use anyhow::Result;
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc};
-use tracing::{debug, error, info, instrument, warn};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tracing::{debug, error, info, warn};
 
-use crate::{
-    protocol::{
-        error_codes, InitializeParams, InitializeResult, JsonRpcError, JsonRpcRequest,
-        JsonRpcResponse, PromptListResult, PromptParams, Prompt, PromptArgument, RequestId,
-        ResourceListResult, ResourceParams, ServerCapabilities, ServerInfo, ToolCallResult,
-        ToolListResult, ToolParams, ToolsCapability, ResourcesCapability, PromptsCapability,
-        JSONRPC_VERSION, MCP_VERSION,
-    },
-    resources::ResourceManager,
-    tools::ToolExecutor,
-    McpServerState,
-};
+/// Run MCP server with STDIO transport
+///
+/// This function starts the MCP server using standard input/output for communication.
+/// It reads JSON-RPC requests from stdin (one per line) and writes responses to stdout.
+///
+/// # Arguments
+///
+/// * `state` - Shared server state containing database pool and resource manager
+///
+/// # Protocol
+///
+/// - Input: JSON-RPC 2.0 requests, one per line
+/// - Output: JSON-RPC 2.0 responses, one per line
+/// - Empty lines are ignored
+///
+/// # Errors
+///
+/// Returns error if:
+/// - I/O operations fail
+/// - JSON parsing fails for requests
+/// - Response serialization fails
+pub async fn run_stdio_server(state: Arc<McpServerState>) -> Result<()> {
+    info!("Starting MCP server with STDIO transport");
 
-/// Handle JSON-RPC request
-#[instrument(skip(state, request))]
-pub async fn handle_jsonrpc(
-    State(state): State<Arc<McpServerState>>,
-    Json(request): Json<JsonRpcRequest>,
-) -> Response {
-    debug!(method = %request.method, id = ?request.id, "Processing JSON-RPC request");
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut stdout = tokio::io::stdout();
+    let mut lines = stdin.lines();
 
-    let response = match request.method.as_str() {
+    while let Some(line) = lines.next_line().await? {
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        debug!(request = %line, "Received STDIO request");
+
+        // Parse JSON-RPC request
+        match serde_json::from_str::<JsonRpcRequest>(&line) {
+            Ok(request) => {
+                // Handle the request using existing handlers
+                let response = handle_request(state.clone(), request).await;
+
+                // Serialize and write response
+                match serde_json::to_string(&response) {
+                    Ok(output) => {
+                        if let Err(e) = stdout.write_all(output.as_bytes()).await {
+                            error!(error = %e, "Failed to write response");
+                            break;
+                        }
+                        if let Err(e) = stdout.write_all(b"\n").await {
+                            error!(error = %e, "Failed to write newline");
+                            break;
+                        }
+                        if let Err(e) = stdout.flush().await {
+                            error!(error = %e, "Failed to flush output");
+                            break;
+                        }
+                        debug!(response = %output, "Sent STDIO response");
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to serialize response");
+                        // Try to send an error response
+                        let error_response = JsonRpcResponse::error(
+                            response.id,
+                            JsonRpcError::internal_error(format!("Serialization error: {}", e)),
+                        );
+                        if let Ok(output) = serde_json::to_string(&error_response) {
+                            let _ = stdout.write_all(output.as_bytes()).await;
+                            let _ = stdout.write_all(b"\n").await;
+                            let _ = stdout.flush().await;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, line = %line, "Parse error");
+                // Send parse error response
+                let error_response = json!({
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32700,
+                        "message": format!("Parse error: {}", e)
+                    },
+                    "id": null
+                });
+                if let Ok(output) = serde_json::to_string(&error_response) {
+                    let _ = stdout.write_all(output.as_bytes()).await;
+                    let _ = stdout.write_all(b"\n").await;
+                    let _ = stdout.flush().await;
+                }
+            }
+        }
+    }
+
+    info!("STDIO transport shutting down");
+    Ok(())
+}
+
+/// Handle a JSON-RPC request
+///
+/// This is a wrapper around the existing HTTP handlers that adapts them
+/// for STDIO transport. It dispatches requests to the appropriate handler
+/// based on the method name.
+async fn handle_request(state: Arc<McpServerState>, request: JsonRpcRequest) -> JsonRpcResponse {
+    debug!(method = %request.method, id = ?request.id, "Processing request");
+
+    match request.method.as_str() {
         "initialize" => handle_initialize(request.id, request.params).await,
         "tools/list" => handle_tools_list(request.id).await,
         "tools/call" => handle_tools_call(state, request.id, request.params).await,
@@ -48,16 +132,19 @@ pub async fn handle_jsonrpc(
                 JsonRpcError::method_not_found(request.method),
             )
         }
-    };
-
-    Json(response).into_response()
+    }
 }
 
-/// Handle initialize request
+/// Handle initialize request (inline implementation)
 async fn handle_initialize(
-    id: RequestId,
+    id: crate::protocol::RequestId,
     params: Option<serde_json::Value>,
 ) -> JsonRpcResponse {
+    use crate::protocol::{
+        InitializeParams, InitializeResult, PromptsCapability, ResourcesCapability,
+        ServerCapabilities, ServerInfo, ToolsCapability, MCP_VERSION,
+    };
+
     info!("Initializing MCP server");
 
     let _params: InitializeParams = match params {
@@ -103,7 +190,9 @@ async fn handle_initialize(
 }
 
 /// Handle tools/list request
-async fn handle_tools_list(id: RequestId) -> JsonRpcResponse {
+async fn handle_tools_list(id: crate::protocol::RequestId) -> JsonRpcResponse {
+    use crate::protocol::ToolListResult;
+
     debug!("Listing tools");
 
     let tools = vec![
@@ -112,7 +201,6 @@ async fn handle_tools_list(id: RequestId) -> JsonRpcResponse {
         crate::tools::CheckAvailabilityTool::definition(),
         crate::tools::GetContentDetailsTool::definition(),
         crate::tools::SyncWatchlistTool::definition(),
-        crate::tools::ListDevicesTool::definition(),
     ];
 
     let result = ToolListResult { tools };
@@ -123,9 +211,12 @@ async fn handle_tools_list(id: RequestId) -> JsonRpcResponse {
 /// Handle tools/call request
 async fn handle_tools_call(
     state: Arc<McpServerState>,
-    id: RequestId,
+    id: crate::protocol::RequestId,
     params: Option<serde_json::Value>,
 ) -> JsonRpcResponse {
+    use crate::protocol::ToolParams;
+    use crate::tools::ToolExecutor;
+
     let tool_params: ToolParams = match params {
         Some(p) => match serde_json::from_value(p) {
             Ok(params) => params,
@@ -148,7 +239,9 @@ async fn handle_tools_call(
     info!(tool = %tool_params.name, "Calling tool");
 
     let executor: Box<dyn ToolExecutor> = match tool_params.name.as_str() {
-        "semantic_search" => Box::new(crate::tools::SemanticSearchTool::new(state.db_pool.clone())),
+        "semantic_search" => {
+            Box::new(crate::tools::SemanticSearchTool::new(state.db_pool.clone()))
+        }
         "get_recommendations" => {
             Box::new(crate::tools::GetRecommendationsTool::new(state.db_pool.clone()))
         }
@@ -158,8 +251,9 @@ async fn handle_tools_call(
         "get_content_details" => {
             Box::new(crate::tools::GetContentDetailsTool::new(state.db_pool.clone()))
         }
-        "sync_watchlist" => Box::new(crate::tools::SyncWatchlistTool::new(state.db_pool.clone())),
-        "list_devices" => Box::new(crate::tools::ListDevicesTool::new(state.db_pool.clone())),
+        "sync_watchlist" => {
+            Box::new(crate::tools::SyncWatchlistTool::new(state.db_pool.clone()))
+        }
         _ => {
             return JsonRpcResponse::error(
                 id,
@@ -180,7 +274,10 @@ async fn handle_tools_call(
 }
 
 /// Handle resources/list request
-async fn handle_resources_list(id: RequestId) -> JsonRpcResponse {
+async fn handle_resources_list(id: crate::protocol::RequestId) -> JsonRpcResponse {
+    use crate::protocol::ResourceListResult;
+    use crate::resources::ResourceManager;
+
     debug!("Listing resources");
 
     let resources = ResourceManager::list_resources();
@@ -192,9 +289,11 @@ async fn handle_resources_list(id: RequestId) -> JsonRpcResponse {
 /// Handle resources/read request
 async fn handle_resources_read(
     state: Arc<McpServerState>,
-    id: RequestId,
+    id: crate::protocol::RequestId,
     params: Option<serde_json::Value>,
 ) -> JsonRpcResponse {
+    use crate::protocol::ResourceParams;
+
     let resource_params: ResourceParams = match params {
         Some(p) => match serde_json::from_value(p) {
             Ok(params) => params,
@@ -216,7 +315,11 @@ async fn handle_resources_read(
 
     info!(uri = %resource_params.uri, "Reading resource");
 
-    match state.resource_manager.read_resource(&resource_params.uri).await {
+    match state
+        .resource_manager
+        .read_resource(&resource_params.uri)
+        .await
+    {
         Ok(content) => JsonRpcResponse::success(id, json!(content)),
         Err(e) => {
             error!(error = %e, uri = %resource_params.uri, "Resource read failed");
@@ -226,7 +329,9 @@ async fn handle_resources_read(
 }
 
 /// Handle prompts/list request
-async fn handle_prompts_list(id: RequestId) -> JsonRpcResponse {
+async fn handle_prompts_list(id: crate::protocol::RequestId) -> JsonRpcResponse {
+    use crate::protocol::{Prompt, PromptArgument, PromptListResult};
+
     debug!("Listing prompts");
 
     let prompts = vec![
@@ -273,9 +378,11 @@ async fn handle_prompts_list(id: RequestId) -> JsonRpcResponse {
 
 /// Handle prompts/get request
 async fn handle_prompts_get(
-    id: RequestId,
+    id: crate::protocol::RequestId,
     params: Option<serde_json::Value>,
 ) -> JsonRpcResponse {
+    use crate::protocol::PromptParams;
+
     let prompt_params: PromptParams = match params {
         Some(p) => match serde_json::from_value(p) {
             Ok(params) => params,
@@ -331,7 +438,7 @@ async fn handle_prompts_get(
             )
         }
         "watchlist_suggestions" => {
-            format!("Generate personalized watchlist suggestions based on user viewing history and preferences.")
+            "Generate personalized watchlist suggestions based on user viewing history and preferences.".to_string()
         }
         _ => {
             return JsonRpcResponse::error(
@@ -344,7 +451,29 @@ async fn handle_prompts_get(
     JsonRpcResponse::success(id, json!({ "text": prompt_text }))
 }
 
-/// Health check handler
-pub async fn health_check() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({ "status": "healthy" })))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::JSONRPC_VERSION;
+
+    #[test]
+    fn test_request_id_serialization() {
+        use crate::protocol::RequestId;
+
+        let id = RequestId::String("test-123".to_string());
+        let serialized = serde_json::to_string(&id).unwrap();
+        assert_eq!(serialized, r#""test-123""#);
+
+        let id = RequestId::Number(42);
+        let serialized = serde_json::to_string(&id).unwrap();
+        assert_eq!(serialized, "42");
+    }
+
+    #[test]
+    fn test_parse_jsonrpc_request() {
+        let json = r#"{"jsonrpc":"2.0","id":"1","method":"initialize","params":{}}"#;
+        let request: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.method, "initialize");
+        assert_eq!(request.jsonrpc, JSONRPC_VERSION);
+    }
 }

@@ -366,7 +366,7 @@ impl SyncPublisher for PubNubPublisher {
         info!(
             "Publishing watchlist update: {:?} for content {}",
             update.operation,
-            message.payload.get_content_id().unwrap_or("unknown")
+            message.payload.get_content_id().unwrap_or_else(|| "unknown".to_string())
         );
 
         self.publish(message).await

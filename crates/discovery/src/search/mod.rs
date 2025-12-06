@@ -40,6 +40,7 @@ pub struct HybridSearchService {
     facet_service: Arc<FacetService>,
     personalization_service: Arc<PersonalizationService>,
     analytics: Option<Arc<SearchAnalytics>>,
+    activity_producer: Option<Arc<KafkaActivityProducer>>,
 }
 
 /// Search request
@@ -628,6 +629,7 @@ mod tests {
             facet_service: Arc::new(FacetService::new()),
             personalization_service,
             analytics: Some(Arc::new(SearchAnalytics::new(db_pool))),
+            activity_producer: None,
         };
 
         let merged = service.reciprocal_rank_fusion(vector_results, keyword_results, 60.0);

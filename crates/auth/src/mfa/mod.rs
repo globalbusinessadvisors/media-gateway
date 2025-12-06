@@ -56,19 +56,19 @@ impl MfaManager {
         let encrypted_secret = self.totp_manager.encrypt_secret(&secret)?;
 
         // Store in database (unverified)
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO mfa_enrollments (id, user_id, encrypted_secret, backup_codes_hash, is_verified)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (user_id) DO UPDATE
             SET encrypted_secret = $3, backup_codes_hash = $4, is_verified = $5, created_at = NOW()
-            "#,
-            Uuid::new_v4(),
-            user_id,
-            encrypted_secret,
-            &backup_codes_hash,
-            false
+            "#
         )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(encrypted_secret)
+        .bind(&backup_codes_hash)
+        .bind(false)
         .execute(&self.db_pool)
         .await?;
 
@@ -94,14 +94,14 @@ impl MfaManager {
         }
 
         // Mark as verified
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE mfa_enrollments
             SET is_verified = true, verified_at = NOW()
             WHERE user_id = $1
-            "#,
-            user_id
+            "#
         )
+        .bind(user_id)
         .execute(&self.db_pool)
         .await?;
 
@@ -138,28 +138,27 @@ impl MfaManager {
     }
 
     pub async fn is_enrolled(&self, user_id: &str) -> Result<bool> {
-        let result = sqlx::query!(
+        let result: Option<(bool,)> = sqlx::query_as(
             r#"
             SELECT is_verified FROM mfa_enrollments WHERE user_id = $1
-            "#,
-            user_id
+            "#
         )
+        .bind(user_id)
         .fetch_optional(&self.db_pool)
         .await?;
 
-        Ok(result.map(|r| r.is_verified).unwrap_or(false))
+        Ok(result.map(|r| r.0).unwrap_or(false))
     }
 
     pub async fn get_enrollment(&self, user_id: &str) -> Result<MfaEnrollment> {
-        sqlx::query_as!(
-            MfaEnrollment,
+        sqlx::query_as::<_, MfaEnrollment>(
             r#"
             SELECT id, user_id, encrypted_secret, backup_codes_hash, is_verified, created_at, verified_at
             FROM mfa_enrollments
             WHERE user_id = $1
-            "#,
-            user_id
+            "#
         )
+        .bind(user_id)
         .fetch_optional(&self.db_pool)
         .await?
         .ok_or(AuthError::MfaEnrollmentNotFound)
@@ -179,15 +178,15 @@ impl MfaManager {
             })
             .collect();
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             UPDATE mfa_enrollments
             SET backup_codes_hash = $1
             WHERE user_id = $2
-            "#,
-            &remaining_codes,
-            user_id
+            "#
         )
+        .bind(&remaining_codes)
+        .bind(user_id)
         .execute(&self.db_pool)
         .await?;
 
@@ -195,12 +194,12 @@ impl MfaManager {
     }
 
     pub async fn disable_mfa(&self, user_id: &str) -> Result<()> {
-        sqlx::query!(
+        sqlx::query(
             r#"
             DELETE FROM mfa_enrollments WHERE user_id = $1
-            "#,
-            user_id
+            "#
         )
+        .bind(user_id)
         .execute(&self.db_pool)
         .await?;
 

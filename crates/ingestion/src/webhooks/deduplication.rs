@@ -90,7 +90,7 @@ impl WebhookDeduplicator {
             .map_err(|e| WebhookError::RedisError(format!("Connection failed: {}", e)))?;
 
         // Store hash with TTL
-        let _: () = conn.set_ex(&key, webhook.timestamp.to_rfc3339(), self.ttl_seconds as usize).await
+        let _: () = conn.set_ex(&key, webhook.timestamp.to_rfc3339(), self.ttl_seconds as u64).await
             .map_err(|e| WebhookError::DeduplicationError(format!("Redis set failed: {}", e)))?;
 
         Ok(hash)

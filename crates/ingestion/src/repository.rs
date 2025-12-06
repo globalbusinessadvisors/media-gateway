@@ -610,7 +610,7 @@ impl ContentRepository for PostgresContentRepository {
                 },
                 images: ImageSet::default(),
                 rating,
-                user_rating: average_rating,
+                user_rating: average_rating.map(|r| r as f32),
                 embedding: None,
                 updated_at: last_updated,
             };
@@ -785,7 +785,7 @@ impl ContentRepository for PostgresContentRepository {
                 },
                 images: ImageSet::default(),
                 rating,
-                user_rating: average_rating,
+                user_rating: average_rating.map(|r| r as f32),
                 embedding: None,
                 updated_at: last_updated,
             };

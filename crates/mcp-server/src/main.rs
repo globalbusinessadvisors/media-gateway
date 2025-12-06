@@ -1,19 +1,27 @@
 //! MCP Server binary
 //!
 //! Entry point for the Model Context Protocol server.
+//!
+//! Supports two transport modes:
+//! - HTTP/SSE (default): Standard HTTP server with Server-Sent Events
+//! - STDIO: Standard input/output for Claude Desktop integration (use --stdio flag)
 
 use axum::{
     routing::{get, post},
     Router,
 };
 use media_gateway_core::{init_logging, DatabaseConfig, DatabasePool, LogConfig, LogFormat};
-use media_gateway_mcp::{handlers, McpServerConfig, McpServerState};
+use media_gateway_mcp::{handlers, transport, McpServerConfig, McpServerState};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let use_stdio = args.contains(&"--stdio".to_string());
+
     // Load environment variables
     dotenvy::dotenv().ok();
 
@@ -55,34 +63,49 @@ async fn main() -> anyhow::Result<()> {
     // Create server state
     let state = Arc::new(McpServerState::new(db_pool.pool().clone()));
 
-    // Build router
-    let app = Router::new()
-        .route("/", post(handlers::handle_jsonrpc))
-        .route("/health", get(handlers::health_check))
-        .with_state(state)
-        .layer(CorsLayer::permissive());
+    // Run server based on transport mode
+    if use_stdio {
+        info!("Starting MCP server with STDIO transport");
+        info!("Server ready for Claude Desktop integration");
 
-    // Start server
-    let addr = config.address();
-    info!(address = %addr, "Starting MCP server");
+        transport::run_stdio_server(state)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "STDIO transport error");
+                anyhow::anyhow!("STDIO server failed: {}", e)
+            })?;
+    } else {
+        info!("Starting MCP server with HTTP transport");
 
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| {
-            error!(error = %e, address = %addr, "Failed to bind to address");
-            anyhow::anyhow!("Failed to bind: {}", e)
-        })?;
+        // Build router
+        let app = Router::new()
+            .route("/", post(handlers::handle_jsonrpc))
+            .route("/health", get(handlers::health_check))
+            .with_state(state)
+            .layer(CorsLayer::permissive());
 
-    info!("MCP server listening on {}", addr);
-    info!("Health check endpoint: http://{}/health", addr);
-    info!("JSON-RPC endpoint: http://{}/", addr);
+        // Start server
+        let addr = config.address();
+        info!(address = %addr, "Starting HTTP server");
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Server error");
-            anyhow::anyhow!("Server failed: {}", e)
-        })?;
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| {
+                error!(error = %e, address = %addr, "Failed to bind to address");
+                anyhow::anyhow!("Failed to bind: {}", e)
+            })?;
+
+        info!("MCP server listening on {}", addr);
+        info!("Health check endpoint: http://{}/health", addr);
+        info!("JSON-RPC endpoint: http://{}/", addr);
+
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| {
+                error!(error = %e, "Server error");
+                anyhow::anyhow!("Server failed: {}", e)
+            })?;
+    }
 
     Ok(())
 }

@@ -186,7 +186,7 @@ impl RateLimitConfigStore {
         let value = serde_json::to_string(config)
             .map_err(|e| AuthError::Internal(format!("Serialization error: {}", e)))?;
 
-        conn.set(&key, value).await.map_err(|e| {
+        conn.set::<_, _, ()>(&key, value).await.map_err(|e| {
             AuthError::Internal(format!("Redis SET error: {}", e))
         })?;
 
@@ -197,7 +197,7 @@ impl RateLimitConfigStore {
         let mut conn = self.get_redis_conn().await?;
         let key = Self::redis_key(endpoint, tier);
 
-        let deleted: usize = conn.del(&key).await.map_err(|e| {
+        let deleted: usize = conn.del::<_, usize>(&key).await.map_err(|e| {
             AuthError::Internal(format!("Redis DEL error: {}", e))
         })?;
 

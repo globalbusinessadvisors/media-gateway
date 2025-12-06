@@ -215,7 +215,7 @@ where
     S::Future: 'static,
     B: 'static,
 {
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse<actix_web::body::EitherBody<B, BoxBody>>;
     type Error = Error;
     type InitError = ();
     type Transform = RateLimitMiddlewareService<S>;
@@ -242,7 +242,7 @@ where
     S::Future: 'static,
     B: 'static,
 {
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse<actix_web::body::EitherBody<B, BoxBody>>;
     type Error = Error;
     type Future = LocalBoxFuture<'static, std::result::Result<Self::Response, Self::Error>>;
 
@@ -261,7 +261,7 @@ where
             // Check for internal service bypass
             if RateLimitMiddleware::check_internal_bypass(&req, &config) {
                 tracing::debug!("Rate limit bypassed for internal service");
-                return service.call(req).await;
+                return service.call(req).await.map(|res| res.map_into_left_body());
             }
 
             // Get rate limit for this endpoint
@@ -269,7 +269,7 @@ where
                 Some((l, w)) => (l, w),
                 None => {
                     // No rate limit configured for this endpoint
-                    return service.call(req).await;
+                    return service.call(req).await.map(|res| res.map_into_left_body());
                 }
             };
 
@@ -296,7 +296,8 @@ where
                     current_count,
                     limit,
                 );
-                return Ok(req.into_response(response));
+                let (http_req, _) = req.into_parts();
+                return Ok(ServiceResponse::new(http_req, response).map_into_right_body());
             }
 
             // Add rate limit headers to response
@@ -312,7 +313,7 @@ where
                     .unwrap(),
             );
 
-            Ok(res)
+            Ok(res.map_into_left_body())
         })
     }
 }

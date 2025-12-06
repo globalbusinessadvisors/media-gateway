@@ -1,4 +1,4 @@
-use actix_web::{get, post, put, delete, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -78,7 +78,6 @@ struct SuccessResponse {
 }
 
 /// GET /api/v1/admin/search/ranking - Get current default ranking config
-#[get("/api/v1/admin/search/ranking")]
 pub async fn get_ranking_config(
     store: web::Data<Arc<RankingConfigStore>>,
     req: HttpRequest,
@@ -102,7 +101,6 @@ pub async fn get_ranking_config(
 }
 
 /// PUT /api/v1/admin/search/ranking - Update default ranking config
-#[put("/api/v1/admin/search/ranking")]
 pub async fn update_ranking_config(
     store: web::Data<Arc<RankingConfigStore>>,
     req: HttpRequest,
@@ -168,7 +166,6 @@ pub struct CreateNamedRankingConfigRequest {
 }
 
 /// GET /api/v1/admin/search/ranking/variants - List all named configs
-#[get("/api/v1/admin/search/ranking/variants")]
 pub async fn list_ranking_variants(
     store: web::Data<Arc<RankingConfigStore>>,
     req: HttpRequest,
@@ -192,7 +189,6 @@ pub async fn list_ranking_variants(
 }
 
 /// GET /api/v1/admin/search/ranking/variants/{name} - Get specific named config
-#[get("/api/v1/admin/search/ranking/variants/{name}")]
 pub async fn get_ranking_variant(
     store: web::Data<Arc<RankingConfigStore>>,
     req: HttpRequest,
@@ -221,7 +217,6 @@ pub async fn get_ranking_variant(
 }
 
 /// PUT /api/v1/admin/search/ranking/variants/{name} - Create/update named config
-#[put("/api/v1/admin/search/ranking/variants/{name}")]
 pub async fn update_ranking_variant(
     store: web::Data<Arc<RankingConfigStore>>,
     req: HttpRequest,
@@ -286,7 +281,6 @@ pub async fn update_ranking_variant(
 }
 
 /// DELETE /api/v1/admin/search/ranking/variants/{name} - Delete named config
-#[delete("/api/v1/admin/search/ranking/variants/{name}")]
 pub async fn delete_ranking_variant(
     store: web::Data<Arc<RankingConfigStore>>,
     req: HttpRequest,
@@ -323,7 +317,6 @@ pub async fn delete_ranking_variant(
 }
 
 /// GET /api/v1/admin/search/ranking/history/{version} - Get config version history
-#[get("/api/v1/admin/search/ranking/history/{version}")]
 pub async fn get_ranking_config_history(
     store: web::Data<Arc<RankingConfigStore>>,
     req: HttpRequest,

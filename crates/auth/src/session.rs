@@ -67,17 +67,17 @@ impl SessionManager {
         let session_json = serde_json::to_string(&session)
             .map_err(|e| AuthError::Internal(format!("Failed to serialize session: {}", e)))?;
 
-        conn.set_ex(&session_key, session_json, SESSION_TTL)
+        conn.set_ex::<_, _, ()>(&session_key, session_json, SESSION_TTL)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to store session: {}", e)))?;
 
         // Index by user_id for easy lookup
         let user_sessions_key = format!("user:{}:sessions", session.user_id);
-        conn.sadd(&user_sessions_key, &session.session_id)
+        conn.sadd::<_, _, ()>(&user_sessions_key, &session.session_id)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to index session: {}", e)))?;
 
-        conn.expire(&user_sessions_key, SESSION_TTL as i64)
+        conn.expire::<_, ()>(&user_sessions_key, SESSION_TTL as i64)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to set expiry: {}", e)))?;
 
@@ -105,7 +105,7 @@ impl SessionManager {
                 let updated_json = serde_json::to_string(&session)
                     .map_err(|e| AuthError::Internal(format!("Failed to serialize session: {}", e)))?;
 
-                conn.set_ex(&session_key, updated_json, SESSION_TTL)
+                conn.set_ex::<_, _, ()>(&session_key, updated_json, SESSION_TTL)
                     .await
                     .map_err(|e| AuthError::Redis(format!("Failed to update session: {}", e)))?;
 
@@ -124,13 +124,13 @@ impl SessionManager {
 
         // Delete session
         let session_key = format!("session:{}", session_id);
-        conn.del(&session_key)
+        conn.del::<_, ()>(&session_key)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
 
         // Remove from user's session set
         let user_sessions_key = format!("user:{}:sessions", session.user_id);
-        conn.srem(&user_sessions_key, session_id)
+        conn.srem::<_, _, ()>(&user_sessions_key, session_id)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to remove session from index: {}", e)))?;
 
@@ -152,13 +152,13 @@ impl SessionManager {
         // Delete all sessions
         for session_id in &session_ids {
             let session_key = format!("session:{}", session_id);
-            conn.del(&session_key)
+            conn.del::<_, ()>(&session_key)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
         }
 
         // Delete user sessions index
-        conn.del(&user_sessions_key)
+        conn.del::<_, ()>(&user_sessions_key)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to delete user sessions index: {}", e)))?;
 
@@ -195,12 +195,12 @@ impl SessionManager {
             }
 
             let session_key = format!("session:{}", session_id);
-            conn.del(&session_key)
+            conn.del::<_, ()>(&session_key)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to delete session: {}", e)))?;
 
             // Remove from user's session set
-            conn.srem(&user_sessions_key, session_id)
+            conn.srem::<_, _, ()>(&user_sessions_key, session_id)
                 .await
                 .map_err(|e| AuthError::Redis(format!("Failed to remove session from index: {}", e)))?;
 
@@ -235,7 +235,7 @@ impl SessionManager {
         let mut conn = self.get_connection().await?;
 
         let revoked_key = format!("revoked:{}", jti);
-        conn.set_ex(&revoked_key, "1", ttl)
+        conn.set_ex::<_, _, ()>(&revoked_key, "1", ttl)
             .await
             .map_err(|e| AuthError::Redis(format!("Failed to revoke token: {}", e)))?;
 

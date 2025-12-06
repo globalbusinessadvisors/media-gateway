@@ -482,3 +482,106 @@ impl ToolExecutor for SyncWatchlistTool {
         })
     }
 }
+
+/// List user devices tool
+pub struct ListDevicesTool {
+    db_pool: PgPool,
+}
+
+impl ListDevicesTool {
+    pub fn new(db_pool: PgPool) -> Self {
+        Self { db_pool }
+    }
+
+    pub fn definition() -> Tool {
+        Tool {
+            name: "list_devices".to_string(),
+            description: "List all registered devices for a user with their capabilities and status".to_string(),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "User UUID",
+                        "format": "uuid"
+                    }
+                },
+                "required": ["user_id"]
+            })),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListDevicesArgs {
+    user_id: Uuid,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct DeviceInfo {
+    device_id: String,
+    device_type: String,
+    platform: String,
+    capabilities: serde_json::Value,
+    last_seen: chrono::DateTime<chrono::Utc>,
+    is_online: bool,
+    device_name: Option<String>,
+}
+
+#[async_trait]
+impl ToolExecutor for ListDevicesTool {
+    #[instrument(skip(self, arguments))]
+    async fn execute(
+        &self,
+        arguments: HashMap<String, serde_json::Value>,
+    ) -> Result<ToolCallResult, MediaGatewayError> {
+        let args: ListDevicesArgs = serde_json::from_value(json!(arguments))
+            .map_err(|e| MediaGatewayError::validation(e.to_string()))?;
+
+        info!(user_id = %args.user_id, "Listing user devices");
+
+        let devices = sqlx::query_as::<_, DeviceInfo>(
+            r#"
+            SELECT device_id, device_type, platform, capabilities,
+                   last_seen, is_online, device_name
+            FROM user_devices
+            WHERE user_id = $1
+            ORDER BY last_seen DESC
+            "#
+        )
+        .bind(args.user_id)
+        .fetch_all(&self.db_pool)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "Database query failed");
+            MediaGatewayError::database(e.to_string(), "list_devices")
+        })?;
+
+        let device_list = devices
+            .into_iter()
+            .map(|device| {
+                json!({
+                    "device_id": device.device_id,
+                    "device_type": device.device_type,
+                    "platform": device.platform,
+                    "capabilities": device.capabilities,
+                    "last_seen": device.last_seen,
+                    "is_online": device.is_online,
+                    "device_name": device.device_name
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let text = serde_json::to_string_pretty(&json!({
+            "user_id": args.user_id,
+            "device_count": device_list.len(),
+            "devices": device_list
+        }))
+        .unwrap_or_else(|_| "Error formatting results".to_string());
+
+        Ok(ToolCallResult {
+            content: vec![ToolContent::Text { text }],
+            is_error: Some(false),
+        })
+    }
+}
