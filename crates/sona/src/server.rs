@@ -17,6 +17,7 @@ use media_gateway_sona::{
 struct AppState {
     engine: Arc<SonaEngine>,
     lora_storage: Arc<media_gateway_sona::LoRAStorage>,
+    experiment_repo: Arc<media_gateway_sona::ExperimentRepository>,
     db_pool: sqlx::PgPool,
 }
 
@@ -149,7 +150,7 @@ async fn get_recommendations(
     };
 
     // Load LoRA adapter if available
-    let lora_adapter = state.lora_storage.load_adapter(req.user_id).await.ok();
+    let lora_adapter = state.lora_storage.load_adapter(req.user_id, "default").await.ok();
 
     // Convert context
     let context = req.context.as_ref().map(|ctx| {
@@ -175,7 +176,33 @@ async fn get_recommendations(
         lora_adapter.as_ref(),
         get_embedding,
     ).await {
-        Ok(recommendations) => {
+        Ok(mut recommendations) => {
+            // Check if user is in any active recommendation experiments
+            if let Ok(experiments) = state.experiment_repo.list_running_experiments().await {
+                for experiment in experiments {
+                    // Try to assign user to variant
+                    if let Ok(variant) = state.experiment_repo.assign_variant(experiment.id, req.user_id).await {
+                        // Apply experiment variant to recommendations
+                        for rec in &mut recommendations {
+                            rec.experiment_variant = Some(format!("{}:{}", experiment.name, variant.name));
+                        }
+
+                        // Record exposure
+                        let _ = state.experiment_repo.record_exposure(
+                            experiment.id,
+                            variant.id,
+                            req.user_id,
+                            Some(serde_json::json!({
+                                "endpoint": "recommendations",
+                                "num_recommendations": recommendations.len()
+                            }))
+                        ).await;
+
+                        break; // Only assign to first matching experiment
+                    }
+                }
+            }
+
             let response = RecommendationResponse {
                 recommendations: recommendations.into_iter().map(|r| RecommendationDto {
                     content_id: r.content_id,
@@ -241,7 +268,7 @@ async fn get_personalization_score(
     };
 
     // Load LoRA adapter
-    let lora_adapter = match state.lora_storage.load_adapter(req.user_id).await {
+    let lora_adapter = match state.lora_storage.load_adapter(req.user_id, "default").await {
         Ok(adapter) => adapter,
         Err(e) => {
             tracing::warn!("LoRA adapter not found, using base model: {}", e);
@@ -398,7 +425,7 @@ async fn trigger_lora_training(
     state: web::Data<AppState>,
 ) -> impl Responder {
     // Load or create LoRA adapter
-    let mut adapter = match state.lora_storage.load_adapter(req.user_id).await {
+    let mut adapter = match state.lora_storage.load_adapter(req.user_id, "default").await {
         Ok(adapter) => adapter,
         Err(_) => {
             let mut adapter = UserLoRAAdapter::new(req.user_id);
@@ -469,7 +496,7 @@ async fn trigger_lora_training(
             let duration_ms = start_time.elapsed().as_millis() as u64;
 
             // Save trained adapter
-            if let Err(e) = state.lora_storage.save_adapter(&adapter).await {
+            if let Err(e) = state.lora_storage.save_adapter(&adapter, "default").await {
                 tracing::error!("Failed to save LoRA adapter: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": "Failed to save trained adapter",
@@ -489,6 +516,206 @@ async fn trigger_lora_training(
             tracing::error!("LoRA training failed: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "LoRA training failed",
+                "message": e.to_string()
+            }))
+        }
+    }
+}
+
+/// Create experiment request
+#[derive(Debug, Deserialize)]
+struct CreateExperimentRequest {
+    name: String,
+    description: Option<String>,
+    traffic_allocation: f32,
+    variants: Vec<CreateVariantDto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateVariantDto {
+    name: String,
+    weight: f32,
+    config: serde_json::Value,
+}
+
+/// POST /api/v1/experiments
+async fn create_experiment(
+    req: web::Json<CreateExperimentRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    use media_gateway_sona::{Experiment, ExperimentStatus};
+
+    let mut experiment = Experiment::new(
+        req.name.clone(),
+        req.description.clone(),
+        req.traffic_allocation,
+    );
+
+    for variant_dto in &req.variants {
+        experiment.add_variant(
+            variant_dto.name.clone(),
+            variant_dto.weight,
+            variant_dto.config.clone(),
+        );
+    }
+
+    match state.experiment_repo.create_experiment(&experiment).await {
+        Ok(experiment_id) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "experiment_id": experiment_id,
+                "name": experiment.name,
+                "status": "draft",
+                "variants": experiment.variants.len()
+            }))
+        }
+        Err(e) => {
+            tracing::error!("Failed to create experiment: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to create experiment",
+                "message": e.to_string()
+            }))
+        }
+    }
+}
+
+/// GET /api/v1/experiments/{experiment_id}
+async fn get_experiment(
+    experiment_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    match state.experiment_repo.get_experiment(*experiment_id).await {
+        Ok(experiment) => HttpResponse::Ok().json(experiment),
+        Err(e) => {
+            tracing::error!("Failed to get experiment: {}", e);
+            HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Experiment not found",
+                "message": e.to_string()
+            }))
+        }
+    }
+}
+
+/// Update experiment status request
+#[derive(Debug, Deserialize)]
+struct UpdateExperimentStatusRequest {
+    status: String,
+}
+
+/// PUT /api/v1/experiments/{experiment_id}/status
+async fn update_experiment_status(
+    experiment_id: web::Path<Uuid>,
+    req: web::Json<UpdateExperimentStatusRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    use media_gateway_sona::ExperimentStatus;
+
+    let status = match req.status.as_str() {
+        "draft" => ExperimentStatus::Draft,
+        "running" => ExperimentStatus::Running,
+        "paused" => ExperimentStatus::Paused,
+        "completed" => ExperimentStatus::Completed,
+        _ => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid status",
+                "valid_statuses": ["draft", "running", "paused", "completed"]
+            }));
+        }
+    };
+
+    match state.experiment_repo.update_status(*experiment_id, status).await {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            "experiment_id": *experiment_id,
+            "status": req.status
+        })),
+        Err(e) => {
+            tracing::error!("Failed to update experiment status: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to update status",
+                "message": e.to_string()
+            }))
+        }
+    }
+}
+
+/// GET /api/v1/experiments
+async fn list_experiments(state: web::Data<AppState>) -> impl Responder {
+    match state.experiment_repo.list_running_experiments().await {
+        Ok(experiments) => HttpResponse::Ok().json(serde_json::json!({
+            "experiments": experiments,
+            "count": experiments.len()
+        })),
+        Err(e) => {
+            tracing::error!("Failed to list experiments: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to list experiments",
+                "message": e.to_string()
+            }))
+        }
+    }
+}
+
+/// Record conversion request
+#[derive(Debug, Deserialize)]
+struct RecordConversionRequest {
+    experiment_id: Uuid,
+    user_id: Uuid,
+    metric_name: String,
+    value: f32,
+    metadata: Option<serde_json::Value>,
+}
+
+/// POST /api/v1/experiments/conversions
+async fn record_conversion(
+    req: web::Json<RecordConversionRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    // Get user's variant assignment
+    let variant = match state.experiment_repo.assign_variant(req.experiment_id, req.user_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("User not in experiment: {}", e);
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "User not in experiment"
+            }));
+        }
+    };
+
+    match state.experiment_repo.record_conversion(
+        req.experiment_id,
+        variant.id,
+        req.user_id,
+        &req.metric_name,
+        req.value,
+        req.metadata.clone(),
+    ).await {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+            "status": "recorded",
+            "experiment_id": req.experiment_id,
+            "variant": variant.name,
+            "metric": req.metric_name,
+            "value": req.value
+        })),
+        Err(e) => {
+            tracing::error!("Failed to record conversion: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to record conversion",
+                "message": e.to_string()
+            }))
+        }
+    }
+}
+
+/// GET /api/v1/experiments/{experiment_id}/metrics
+async fn get_experiment_metrics(
+    experiment_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    match state.experiment_repo.get_experiment_metrics(*experiment_id).await {
+        Ok(metrics) => HttpResponse::Ok().json(metrics),
+        Err(e) => {
+            tracing::error!("Failed to get experiment metrics: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to get metrics",
                 "message": e.to_string()
             }))
         }
@@ -525,10 +752,14 @@ async fn main() -> std::io::Result<()> {
     // Initialize LoRA storage
     let lora_storage = Arc::new(media_gateway_sona::LoRAStorage::new(db_pool.clone()));
 
+    // Initialize experiment repository
+    let experiment_repo = Arc::new(media_gateway_sona::ExperimentRepository::new(db_pool.clone()));
+
     // Create app state
     let app_state = web::Data::new(AppState {
         engine,
         lora_storage,
+        experiment_repo,
         db_pool,
     });
 
@@ -544,6 +775,13 @@ async fn main() -> std::io::Result<()> {
                     .route("/personalization/score", web::post().to(get_personalization_score))
                     .route("/profile/update", web::post().to(update_profile))
                     .route("/lora/train", web::post().to(trigger_lora_training))
+                    // A/B Testing endpoints
+                    .route("/experiments", web::post().to(create_experiment))
+                    .route("/experiments", web::get().to(list_experiments))
+                    .route("/experiments/{experiment_id}", web::get().to(get_experiment))
+                    .route("/experiments/{experiment_id}/status", web::put().to(update_experiment_status))
+                    .route("/experiments/{experiment_id}/metrics", web::get().to(get_experiment_metrics))
+                    .route("/experiments/conversions", web::post().to(record_conversion))
             )
     })
     .bind(("0.0.0.0", 8082))?

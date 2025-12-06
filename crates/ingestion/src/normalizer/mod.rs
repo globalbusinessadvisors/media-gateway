@@ -10,7 +10,13 @@ pub mod netflix;
 pub mod prime_video;
 pub mod disney_plus;
 pub mod youtube;
+pub mod hbo_max;
+pub mod hulu;
+pub mod apple_tv_plus;
+pub mod paramount_plus;
+pub mod peacock;
 pub mod generic;
+pub mod circuit_breaker_integration;
 
 /// Raw content item from a platform API
 #[derive(Debug, Clone, Serialize, Deserialize)]

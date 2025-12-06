@@ -1,28 +1,52 @@
 //! Intent parsing tests
 
+use crate::cache::RedisCache;
+use crate::config::CacheConfig;
 use crate::intent::*;
+use std::sync::Arc;
 
-#[test]
-fn test_intent_parser_extract_similarity_pattern() {
-    let parser = IntentParser::new(String::new(), String::new());
+async fn create_test_cache() -> Arc<RedisCache> {
+    let config = Arc::new(CacheConfig {
+        redis_url: std::env::var("REDIS_URL")
+            .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+        search_ttl_sec: 1800,
+        embedding_ttl_sec: 3600,
+        intent_ttl_sec: 600,
+    });
+
+    match RedisCache::new(config).await {
+        Ok(c) => Arc::new(c),
+        Err(_) => {
+            // Return a mock cache that will panic if used, but allows tests to compile
+            panic!("Redis required for tests")
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_intent_parser_extract_similarity_pattern() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let references = parser.extract_references("movies like The Matrix");
 
     assert_eq!(references.len(), 1);
     assert_eq!(references[0], "The Matrix");
 }
 
-#[test]
-fn test_intent_parser_extract_similarity_similar_to_pattern() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_intent_parser_extract_similarity_similar_to_pattern() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let references = parser.extract_references("shows similar to Breaking Bad");
 
     assert_eq!(references.len(), 1);
     assert_eq!(references[0], "Breaking Bad");
 }
 
-#[test]
-fn test_intent_parser_extract_multiple_references() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_intent_parser_extract_multiple_references() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let references = parser.extract_references("movies like Inception and similar to The Matrix");
 
     assert_eq!(references.len(), 2);
@@ -30,62 +54,69 @@ fn test_intent_parser_extract_multiple_references() {
     assert!(references.contains(&"The Matrix".to_string()));
 }
 
-#[test]
-fn test_intent_parser_extract_person_from_query() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_intent_parser_extract_person_from_query() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
 
     // Test parsing with people names (would be in full implementation)
     let intent = parser.fallback_parse("movies starring Tom Hanks");
     assert_eq!(intent.fallback_query, "movies starring Tom Hanks");
 }
 
-#[test]
-fn test_intent_parser_mood_detection_dark() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_intent_parser_mood_detection_dark() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
 
     // Dark mood detection would be done by GPT in full implementation
     let intent = parser.fallback_parse("dark and gritty thriller");
     assert!(intent.filters.genre.contains(&"thriller".to_string()));
 }
 
-#[test]
-fn test_intent_parser_mood_detection_uplifting() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_intent_parser_mood_detection_uplifting() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
 
     // Uplifting mood detection would be done by GPT
     let intent = parser.fallback_parse("uplifting comedy");
     assert!(intent.filters.genre.contains(&"comedy".to_string()));
 }
 
-#[test]
-fn test_intent_parser_temporal_pattern_80s_movies() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_intent_parser_temporal_pattern_80s_movies() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
 
     // Temporal pattern extraction would be in GPT implementation
     let intent = parser.fallback_parse("80s action movies");
     assert!(intent.filters.genre.contains(&"action".to_string()));
 }
 
-#[test]
-fn test_intent_parser_temporal_pattern_recent() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_intent_parser_temporal_pattern_recent() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
 
     let intent = parser.fallback_parse("recent sci-fi movies");
     assert!(intent.filters.genre.iter().any(|g| g.contains("science") || g == "sci-fi"));
 }
 
-#[test]
-fn test_fallback_parse_genre_extraction_action() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_genre_extraction_action() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("action movies");
 
     assert_eq!(intent.filters.genre, vec!["action"]);
     assert_eq!(intent.confidence, 0.5);
 }
 
-#[test]
-fn test_fallback_parse_genre_extraction_multiple_genres() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_genre_extraction_multiple_genres() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("action comedy thriller");
 
     assert!(intent.filters.genre.contains(&"action".to_string()));
@@ -93,9 +124,10 @@ fn test_fallback_parse_genre_extraction_multiple_genres() {
     assert!(intent.filters.genre.contains(&"thriller".to_string()));
 }
 
-#[test]
-fn test_fallback_parse_genre_extraction_sci_fi() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_genre_extraction_sci_fi() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
 
     let intent1 = parser.fallback_parse("sci-fi movies");
     assert!(intent1.filters.genre.contains(&"science_fiction".to_string()));
@@ -104,51 +136,57 @@ fn test_fallback_parse_genre_extraction_sci_fi() {
     assert!(intent2.filters.genre.contains(&"science_fiction".to_string()));
 }
 
-#[test]
-fn test_fallback_parse_platform_extraction_netflix() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_platform_extraction_netflix() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("netflix shows");
 
     assert_eq!(intent.filters.platform, vec!["netflix"]);
 }
 
-#[test]
-fn test_fallback_parse_platform_extraction_multiple_platforms() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_platform_extraction_multiple_platforms() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("netflix hbo movies");
 
     assert!(intent.filters.platform.contains(&"netflix".to_string()));
     assert!(intent.filters.platform.contains(&"hbo_max".to_string()));
 }
 
-#[test]
-fn test_fallback_parse_platform_extraction_prime() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_platform_extraction_prime() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("prime video shows");
 
     assert!(intent.filters.platform.contains(&"prime_video".to_string()));
 }
 
-#[test]
-fn test_fallback_parse_platform_extraction_disney() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_platform_extraction_disney() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("disney movies");
 
     assert!(intent.filters.platform.contains(&"disney_plus".to_string()));
 }
 
-#[test]
-fn test_fallback_parse_combined_genre_and_platform() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_combined_genre_and_platform() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("netflix action movies");
 
     assert!(intent.filters.genre.contains(&"action".to_string()));
     assert!(intent.filters.platform.contains(&"netflix".to_string()));
 }
 
-#[test]
-fn test_fallback_parse_no_matches() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_no_matches() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let intent = parser.fallback_parse("something random xyz");
 
     assert!(intent.filters.genre.is_empty());
@@ -156,9 +194,10 @@ fn test_fallback_parse_no_matches() {
     assert_eq!(intent.fallback_query, "something random xyz");
 }
 
-#[test]
-fn test_fallback_parse_case_insensitive() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_fallback_parse_case_insensitive() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
 
     let intent1 = parser.fallback_parse("ACTION MOVIES");
     assert!(intent1.filters.genre.contains(&"action".to_string()));
@@ -167,9 +206,10 @@ fn test_fallback_parse_case_insensitive() {
     assert!(intent2.filters.platform.contains(&"netflix".to_string()));
 }
 
-#[test]
-fn test_extract_genres_comprehensive() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_extract_genres_comprehensive() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let tokens = vec!["action", "comedy", "drama", "horror", "thriller", "romance",
                      "sci-fi", "fantasy", "documentary"];
 
@@ -181,9 +221,10 @@ fn test_extract_genres_comprehensive() {
     assert!(genres.contains(&"science_fiction".to_string()));
 }
 
-#[test]
-fn test_extract_platforms_comprehensive() {
-    let parser = IntentParser::new(String::new(), String::new());
+#[tokio::test]
+async fn test_extract_platforms_comprehensive() {
+    let cache = create_test_cache().await;
+    let parser = IntentParser::new(String::new(), String::new(), cache);
     let tokens = vec!["netflix", "prime", "hulu", "disney", "hbo"];
 
     let platforms = parser.extract_platforms(&tokens);

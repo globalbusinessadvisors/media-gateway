@@ -3,6 +3,8 @@ use media_gateway_auth::{
     oauth::OAuthConfig,
     session::SessionManager,
     storage::AuthStorage,
+    token_family::TokenFamilyManager,
+    middleware::RateLimitConfig,
     server::start_server,
 };
 use std::{env, fs, sync::Arc};
@@ -52,10 +54,42 @@ async fn main() -> std::io::Result<()> {
             .expect("Failed to initialize session manager"),
     );
 
+    // Initialize token family manager
+    let token_family_manager = Arc::new(
+        TokenFamilyManager::new(&redis_url)
+            .expect("Failed to initialize token family manager"),
+    );
+
     // Initialize OAuth config (load from environment)
-    let oauth_config = OAuthConfig {
-        providers: std::collections::HashMap::new(),
-    };
+    let mut providers = std::collections::HashMap::new();
+
+    // Add Google OAuth provider if configured
+    if let (Ok(client_id), Ok(client_secret)) = (
+        env::var("GOOGLE_CLIENT_ID"),
+        env::var("GOOGLE_CLIENT_SECRET")
+    ) {
+        let redirect_uri = env::var("GOOGLE_REDIRECT_URI")
+            .unwrap_or_else(|_| "https://api.mediagateway.io/auth/oauth/google/callback".to_string());
+
+        providers.insert(
+            "google".to_string(),
+            media_gateway_auth::oauth::OAuthProvider {
+                client_id,
+                client_secret,
+                authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                token_url: "https://oauth2.googleapis.com/token".to_string(),
+                redirect_uri,
+                scopes: vec![
+                    "openid".to_string(),
+                    "email".to_string(),
+                    "profile".to_string(),
+                ],
+            },
+        );
+        tracing::info!("Google OAuth provider configured");
+    }
+
+    let oauth_config = OAuthConfig { providers };
 
     // Initialize auth storage (Redis-backed)
     let auth_storage = Arc::new(
@@ -63,6 +97,52 @@ async fn main() -> std::io::Result<()> {
             .expect("Failed to initialize auth storage"),
     );
 
-    // Start server
-    start_server(&bind_address, jwt_manager, session_manager, oauth_config, auth_storage).await
+    // Initialize Redis client for rate limiting
+    let redis_client = redis::Client::open(redis_url.as_str())
+        .expect("Failed to create Redis client for rate limiting");
+
+    // Configure rate limits
+    let rate_limit_config = RateLimitConfig::new(
+        env::var("RATE_LIMIT_TOKEN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+        env::var("RATE_LIMIT_DEVICE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5),
+        env::var("RATE_LIMIT_AUTHORIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20),
+        env::var("RATE_LIMIT_REVOKE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+    );
+
+    let rate_limit_config = if let Ok(secret) = env::var("INTERNAL_SERVICE_SECRET") {
+        rate_limit_config.with_internal_secret(secret)
+    } else {
+        rate_limit_config
+    };
+
+    tracing::info!("Rate limiting configured: token={}, device={}, authorize={}, revoke={}",
+        rate_limit_config.token_endpoint_limit,
+        rate_limit_config.device_endpoint_limit,
+        rate_limit_config.authorize_endpoint_limit,
+        rate_limit_config.revoke_endpoint_limit
+    );
+
+    // Start server with rate limiting
+    start_server(
+        &bind_address,
+        jwt_manager,
+        session_manager,
+        token_family_manager,
+        oauth_config,
+        auth_storage,
+        redis_client,
+        rate_limit_config,
+    ).await
 }

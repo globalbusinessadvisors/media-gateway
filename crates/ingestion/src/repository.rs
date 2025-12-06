@@ -18,6 +18,13 @@ pub trait ContentRepository: Send + Sync {
     /// Upsert batch of content items in a transaction
     async fn upsert_batch(&self, items: &[CanonicalContent]) -> Result<Vec<Uuid>>;
 
+    /// Find content by platform content ID
+    async fn find_by_platform_id(
+        &self,
+        platform_content_id: &str,
+        platform: &str,
+    ) -> Result<Option<Uuid>>;
+
     /// Update only availability fields
     async fn update_availability(
         &self,
@@ -30,6 +37,15 @@ pub trait ContentRepository: Send + Sync {
 
     /// Find content expiring within duration
     async fn find_expiring_within(&self, duration: Duration) -> Result<Vec<ExpiringContent>>;
+
+    /// Find content with stale embeddings (older than threshold)
+    async fn find_stale_embeddings(&self, threshold: DateTime<Utc>) -> Result<Vec<StaleContent>>;
+
+    /// Update embedding for content
+    async fn update_embedding(&self, content_id: Uuid, embedding: &[f32]) -> Result<()>;
+
+    /// Update quality score for content
+    async fn update_quality_score(&self, content_id: Uuid, quality_score: f64) -> Result<()>;
 }
 
 /// Content expiring soon
@@ -40,6 +56,13 @@ pub struct ExpiringContent {
     pub platform: String,
     pub region: String,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Content with stale embeddings
+#[derive(Debug, Clone)]
+pub struct StaleContent {
+    pub content_id: Uuid,
+    pub content: CanonicalContent,
 }
 
 /// PostgreSQL implementation of ContentRepository
@@ -348,6 +371,23 @@ impl ContentRepository for PostgresContentRepository {
         Ok(all_ids)
     }
 
+    async fn find_by_platform_id(
+        &self,
+        platform_content_id: &str,
+        platform: &str,
+    ) -> Result<Option<Uuid>> {
+        let result = sqlx::query_scalar::<_, Uuid>(
+            "SELECT content_id FROM platform_ids WHERE platform_content_id = $1 AND platform = $2"
+        )
+        .bind(platform_content_id)
+        .bind(platform)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to find content by platform ID")?;
+
+        Ok(result)
+    }
+
     async fn update_availability(
         &self,
         content_id: Uuid,
@@ -356,23 +396,256 @@ impl ContentRepository for PostgresContentRepository {
         available: bool,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        // Stub implementation
-        // TODO: Update availability based on content lookup
-        // This requires querying content by platform_content_id and platform_id,
-        // then updating the availability field in the CanonicalContent structure
-        // Parameters: content_id, platform, region, available, expires_at
+        if available {
+            // Update or insert availability record
+            sqlx::query(
+                r#"
+                INSERT INTO platform_availability (
+                    content_id, platform, region, availability_type,
+                    deep_link, web_fallback, available_from, expires_at
+                )
+                VALUES ($1, $2, $3, 'subscription', '', '', $4, $5)
+                ON CONFLICT (id) DO UPDATE SET
+                    expires_at = EXCLUDED.expires_at
+                WHERE platform_availability.content_id = $1
+                  AND platform_availability.platform = $2
+                  AND platform_availability.region = $3
+                "#
+            )
+            .bind(content_id)
+            .bind(platform)
+            .bind(region)
+            .bind(Utc::now())
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await
+            .context("Failed to update availability")?;
+        } else {
+            // Mark as unavailable by setting expires_at to now
+            sqlx::query(
+                r#"
+                UPDATE platform_availability
+                SET expires_at = $1
+                WHERE content_id = $2 AND platform = $3 AND region = $4
+                "#
+            )
+            .bind(Utc::now())
+            .bind(content_id)
+            .bind(platform)
+            .bind(region)
+            .execute(&self.pool)
+            .await
+            .context("Failed to mark content as unavailable")?;
+        }
 
         Ok(())
     }
 
     async fn find_expiring_within(&self, duration: Duration) -> Result<Vec<ExpiringContent>> {
-        // Stub implementation
-        // TODO: Query database for content where:
-        // content.availability.available_until is Some(date) AND
-        // date is within the next 'duration' from now
-        // Return ExpiringContent with: content_id, title, platform_id, region, expires_at
+        let expiring_threshold = Utc::now() + duration;
 
-        Ok(Vec::new())
+        let results = sqlx::query_as::<_, (Uuid, String, String, String, DateTime<Utc>)>(
+            r#"
+            SELECT
+                pa.content_id,
+                c.title,
+                pa.platform,
+                pa.region,
+                pa.expires_at
+            FROM platform_availability pa
+            INNER JOIN content c ON c.id = pa.content_id
+            WHERE pa.expires_at IS NOT NULL
+              AND pa.expires_at <= $1
+              AND pa.expires_at > NOW()
+            ORDER BY pa.expires_at ASC
+            "#
+        )
+        .bind(expiring_threshold)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to find expiring content")?;
+
+        let expiring_content = results.into_iter()
+            .map(|(content_id, title, platform, region, expires_at)| ExpiringContent {
+                content_id,
+                title,
+                platform,
+                region,
+                expires_at,
+            })
+            .collect();
+
+        Ok(expiring_content)
+    }
+
+    async fn find_stale_embeddings(&self, threshold: DateTime<Utc>) -> Result<Vec<StaleContent>> {
+        // Query for content where last_updated < threshold or embedding is null
+        let results = sqlx::query_as::<_, (
+            Uuid,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Option<i32>,
+            Option<i32>,
+            Option<String>,
+            Option<f64>,
+            DateTime<Utc>,
+        )>(
+            r#"
+            SELECT
+                c.id,
+                c.title,
+                c.content_type,
+                COALESCE(c.original_title, c.title) as original_title,
+                c.overview,
+                COALESCE(pi.platform, 'unknown') as platform,
+                EXTRACT(YEAR FROM c.release_date)::integer as release_year,
+                c.runtime_minutes,
+                c.rating,
+                c.average_rating,
+                c.last_updated
+            FROM content c
+            LEFT JOIN platform_ids pi ON pi.content_id = c.id
+            WHERE c.last_updated < $1
+               OR c.embedding IS NULL
+            ORDER BY c.last_updated ASC
+            LIMIT 1000
+            "#
+        )
+        .bind(threshold)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to find stale embeddings")?;
+
+        // Convert to StaleContent with CanonicalContent
+        let mut stale_items = Vec::new();
+
+        for (content_id, title, content_type, _original_title, overview, platform, release_year, runtime_minutes, rating, average_rating, last_updated) in results {
+            // Fetch genres
+            let genres = sqlx::query_scalar::<_, String>(
+                "SELECT genre FROM content_genres WHERE content_id = $1"
+            )
+            .bind(content_id)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+
+            // Fetch external IDs
+            let external_ids_row = sqlx::query_as::<_, (Option<String>, Option<String>, Option<i32>, Option<i32>, Option<String>)>(
+                "SELECT eidr_id, imdb_id, tmdb_id, tvdb_id, gracenote_tms_id FROM external_ids WHERE content_id = $1"
+            )
+            .bind(content_id)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap_or(None);
+
+            let mut external_ids = std::collections::HashMap::new();
+            if let Some((eidr, imdb, tmdb, tvdb, gracenote)) = external_ids_row {
+                if let Some(e) = eidr { external_ids.insert("eidr".to_string(), e); }
+                if let Some(i) = imdb { external_ids.insert("imdb".to_string(), i); }
+                if let Some(t) = tmdb { external_ids.insert("tmdb".to_string(), t.to_string()); }
+                if let Some(t) = tvdb { external_ids.insert("tvdb".to_string(), t.to_string()); }
+                if let Some(g) = gracenote { external_ids.insert("gracenote".to_string(), g); }
+            }
+
+            // Fetch platform content ID
+            let platform_content_id = sqlx::query_scalar::<_, String>(
+                "SELECT platform_content_id FROM platform_ids WHERE content_id = $1 AND platform = $2"
+            )
+            .bind(content_id)
+            .bind(&platform)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_else(|| content_id.to_string());
+
+            // Parse content type
+            let parsed_content_type = match content_type.as_str() {
+                "movie" => ContentType::Movie,
+                "series" => ContentType::Series,
+                "episode" => ContentType::Episode,
+                "short" => ContentType::Short,
+                "documentary" => ContentType::Documentary,
+                _ => ContentType::Movie,
+            };
+
+            // Build CanonicalContent
+            let canonical = CanonicalContent {
+                platform_content_id,
+                platform_id: platform,
+                entity_id: None,
+                title,
+                overview,
+                content_type: parsed_content_type,
+                release_year,
+                runtime_minutes,
+                genres,
+                external_ids,
+                availability: AvailabilityInfo {
+                    regions: vec![],
+                    subscription_required: false,
+                    purchase_price: None,
+                    rental_price: None,
+                    currency: None,
+                    available_from: None,
+                    available_until: None,
+                },
+                images: ImageSet::default(),
+                rating,
+                user_rating: average_rating,
+                embedding: None,
+                updated_at: last_updated,
+            };
+
+            stale_items.push(StaleContent {
+                content_id,
+                content: canonical,
+            });
+        }
+
+        Ok(stale_items)
+    }
+
+    async fn update_embedding(&self, content_id: Uuid, embedding: &[f32]) -> Result<()> {
+        // Store embedding as JSONB array
+        let embedding_json = serde_json::to_value(embedding)
+            .context("Failed to serialize embedding")?;
+
+        sqlx::query(
+            r#"
+            UPDATE content
+            SET embedding = $1,
+                last_updated = $2
+            WHERE id = $3
+            "#
+        )
+        .bind(embedding_json)
+        .bind(Utc::now())
+        .bind(content_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update embedding")?;
+
+        Ok(())
+    }
+
+    async fn update_quality_score(&self, content_id: Uuid, quality_score: f64) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE content
+            SET quality_score = $1
+            WHERE id = $2
+            "#
+        )
+        .bind(quality_score)
+        .bind(content_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update quality score")?;
+
+        Ok(())
     }
 }
 

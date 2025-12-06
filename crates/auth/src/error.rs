@@ -75,6 +75,24 @@ pub enum AuthError {
 
     #[error("Unauthorized")]
     Unauthorized,
+
+    #[error("MFA not enrolled")]
+    MfaNotEnrolled,
+
+    #[error("MFA already enrolled")]
+    MfaAlreadyEnrolled,
+
+    #[error("Invalid MFA code")]
+    InvalidMfaCode,
+
+    #[error("MFA enrollment not found")]
+    MfaEnrollmentNotFound,
+
+    #[error("Invalid backup code")]
+    InvalidBackupCode,
+
+    #[error("Encryption error: {0}")]
+    Encryption(String),
 }
 
 impl ResponseError for AuthError {
@@ -168,6 +186,30 @@ impl ResponseError for AuthError {
                 HttpResponse::Unauthorized().json(serde_json::json!({
                     "error": "unauthorized",
                     "error_description": "Authentication required"
+                }))
+            }
+            AuthError::MfaNotEnrolled => {
+                HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "mfa_not_enrolled",
+                    "error_description": "MFA is not enrolled for this user"
+                }))
+            }
+            AuthError::MfaAlreadyEnrolled => {
+                HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "mfa_already_enrolled",
+                    "error_description": "MFA is already enrolled for this user"
+                }))
+            }
+            AuthError::InvalidMfaCode => {
+                HttpResponse::Unauthorized().json(serde_json::json!({
+                    "error": "invalid_mfa_code",
+                    "error_description": "Invalid MFA code"
+                }))
+            }
+            AuthError::InvalidBackupCode => {
+                HttpResponse::Unauthorized().json(serde_json::json!({
+                    "error": "invalid_backup_code",
+                    "error_description": "Invalid backup code"
                 }))
             }
             _ => {

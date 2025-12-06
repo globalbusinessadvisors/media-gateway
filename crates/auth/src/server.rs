@@ -1,8 +1,12 @@
 use crate::{
+    api_keys::{ApiKey, ApiKeyManager, CreateApiKeyRequest},
     error::{AuthError, Result},
     jwt::JwtManager,
+    mfa::MfaManager,
+    middleware::{RateLimitConfig, RateLimitMiddleware, extract_user_context},
     oauth::{
         device::{DeviceAuthorizationResponse, DeviceCode},
+        handlers::{google_authorize, google_callback},
         pkce::{AuthorizationCode, PkceChallenge},
         OAuthConfig, OAuthManager,
     },
@@ -11,14 +15,16 @@ use crate::{
     session::SessionManager,
     storage::AuthStorage,
     token::TokenManager,
+    token_family::TokenFamilyManager,
 };
 use actix_web::{
-    get, post,
+    delete, get, post,
     web::{self, Data},
     App, HttpResponse, HttpServer, Responder,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Application state shared across handlers
 pub struct AppState {
@@ -28,6 +34,9 @@ pub struct AppState {
     pub rbac_manager: Arc<RbacManager>,
     pub scope_manager: Arc<ScopeManager>,
     pub storage: Arc<AuthStorage>,
+    pub token_family_manager: Arc<TokenFamilyManager>,
+    pub mfa_manager: Option<Arc<MfaManager>>,
+    pub api_key_manager: Option<Arc<ApiKeyManager>>,
 }
 
 // ============================================================================
@@ -177,7 +186,7 @@ async fn exchange_authorization_code(
     auth_code.mark_as_used();
     state.storage.update_auth_code(code, &auth_code).await?;
 
-    // Generate tokens
+    // Generate tokens with token family
     let access_token = state.jwt_manager.create_access_token(
         auth_code.user_id.clone(),
         Some(format!("user{}@example.com", auth_code.user_id)),
@@ -185,15 +194,20 @@ async fn exchange_authorization_code(
         auth_code.scopes.clone(),
     )?;
 
-    let refresh_token = state.jwt_manager.create_refresh_token(
+    // Create new token family for this authorization
+    let family_id = state.token_family_manager.create_family(auth_code.user_id.clone()).await?;
+
+    let refresh_token = state.jwt_manager.create_refresh_token_with_family(
         auth_code.user_id.clone(),
         Some(format!("user{}@example.com", auth_code.user_id)),
         vec!["free_user".to_string()],
         auth_code.scopes.clone(),
+        family_id,
     )?;
 
-    // Create session
+    // Create session and add token to family
     let refresh_claims = state.jwt_manager.verify_refresh_token(&refresh_token)?;
+    state.token_family_manager.add_token_to_family(family_id, refresh_claims.jti.clone()).await?;
     state
         .session_manager
         .create_session(auth_code.user_id.clone(), refresh_claims.jti, None)
@@ -219,7 +233,32 @@ async fn refresh_access_token(form: &TokenRequest, state: &AppState) -> Result<H
         return Err(AuthError::InvalidToken("Token revoked".to_string()));
     }
 
-    // Generate new tokens
+    // Extract token family ID
+    let family_id = claims.token_family_id.ok_or(AuthError::InvalidToken(
+        "Token missing family ID (legacy token)".to_string()
+    ))?;
+
+    // SECURITY CHECK: Verify token is in its family
+    let is_in_family = state.token_family_manager.is_token_in_family(family_id, &claims.jti).await?;
+
+    if !is_in_family {
+        // SECURITY EVENT: Token reuse detected - revoke entire family
+        tracing::error!(
+            user_id = %claims.sub,
+            family_id = %family_id,
+            attempted_jti = %claims.jti,
+            "Token reuse detected - revoking entire token family"
+        );
+
+        // Revoke all tokens in the family
+        state.token_family_manager.revoke_family(family_id).await?;
+
+        return Err(AuthError::InvalidToken(
+            "Token reuse detected. All tokens in this family have been revoked.".to_string()
+        ));
+    }
+
+    // Generate new tokens with same family
     let new_access_token = state.jwt_manager.create_access_token(
         claims.sub.clone(),
         claims.email.clone(),
@@ -227,22 +266,35 @@ async fn refresh_access_token(form: &TokenRequest, state: &AppState) -> Result<H
         claims.scopes.clone(),
     )?;
 
-    let new_refresh_token = state.jwt_manager.create_refresh_token(
+    let new_refresh_token = state.jwt_manager.create_refresh_token_with_family(
         claims.sub.clone(),
         claims.email.clone(),
         claims.roles.clone(),
         claims.scopes.clone(),
+        family_id,
     )?;
 
-    // Revoke old refresh token
+    // Remove old JTI from family and revoke it
+    state.token_family_manager.remove_token_from_family(family_id, &claims.jti).await?;
     state.session_manager.revoke_token(&claims.jti, 3600).await?;
 
-    // Create new session
+    // Add new JTI to family
     let new_refresh_claims = state.jwt_manager.verify_refresh_token(&new_refresh_token)?;
+    state.token_family_manager.add_token_to_family(family_id, new_refresh_claims.jti.clone()).await?;
+
+    // Create new session
     state
         .session_manager
         .create_session(claims.sub.clone(), new_refresh_claims.jti, None)
         .await?;
+
+    tracing::debug!(
+        user_id = %claims.sub,
+        family_id = %family_id,
+        old_jti = %claims.jti,
+        new_jti = %new_refresh_claims.jti,
+        "Successfully rotated refresh token"
+    );
 
     Ok(HttpResponse::Ok().json(TokenResponse {
         access_token: new_access_token,
@@ -267,7 +319,7 @@ async fn exchange_device_code(form: &TokenRequest, state: &AppState) -> Result<H
 
     let user_id = device.user_id.clone().ok_or(AuthError::Internal("User ID not found".to_string()))?;
 
-    // Generate tokens
+    // Generate tokens with token family
     let access_token = state.jwt_manager.create_access_token(
         user_id.clone(),
         Some(format!("user{}@example.com", user_id)),
@@ -275,15 +327,20 @@ async fn exchange_device_code(form: &TokenRequest, state: &AppState) -> Result<H
         device.scopes.clone(),
     )?;
 
-    let refresh_token = state.jwt_manager.create_refresh_token(
+    // Create new token family for this device authorization
+    let family_id = state.token_family_manager.create_family(user_id.clone()).await?;
+
+    let refresh_token = state.jwt_manager.create_refresh_token_with_family(
         user_id.clone(),
         Some(format!("user{}@example.com", user_id)),
         vec!["free_user".to_string()],
         device.scopes.clone(),
+        family_id,
     )?;
 
-    // Create session
+    // Create session and add token to family
     let refresh_claims = state.jwt_manager.verify_refresh_token(&refresh_token)?;
+    state.token_family_manager.add_token_to_family(family_id, refresh_claims.jti.clone()).await?;
     state
         .session_manager
         .create_session(user_id.clone(), refresh_claims.jti, None)
@@ -432,10 +489,10 @@ async fn device_poll(
     // Check status - this will return error if still pending
     device.check_status()?;
 
-    // If we reach here, device is approved - generate tokens
+    // If we reach here, device is approved - generate tokens with token family
     let user_id = device.user_id.clone().ok_or(AuthError::Internal("User ID not found".to_string()))?;
 
-    // Generate tokens
+    // Generate tokens with token family
     let access_token = state.jwt_manager.create_access_token(
         user_id.clone(),
         Some(format!("user{}@example.com", user_id)),
@@ -443,15 +500,20 @@ async fn device_poll(
         device.scopes.clone(),
     )?;
 
-    let refresh_token = state.jwt_manager.create_refresh_token(
+    // Create new token family for this device authorization
+    let family_id = state.token_family_manager.create_family(user_id.clone()).await?;
+
+    let refresh_token = state.jwt_manager.create_refresh_token_with_family(
         user_id.clone(),
         Some(format!("user{}@example.com", user_id)),
         vec!["free_user".to_string()],
         device.scopes.clone(),
+        family_id,
     )?;
 
-    // Create session
+    // Create session and add token to family
     let refresh_claims = state.jwt_manager.verify_refresh_token(&refresh_token)?;
+    state.token_family_manager.add_token_to_family(family_id, refresh_claims.jti.clone()).await?;
     state
         .session_manager
         .create_session(user_id.clone(), refresh_claims.jti, None)
@@ -470,6 +532,189 @@ async fn device_poll(
 }
 
 // ============================================================================
+// API Key Management Endpoints
+// ============================================================================
+
+#[post("/api/v1/auth/api-keys")]
+async fn create_api_key(
+    req: actix_web::HttpRequest,
+    body: web::Json<CreateApiKeyRequest>,
+    state: Data<AppState>,
+) -> Result<impl Responder> {
+    let api_key_manager = state.api_key_manager.as_ref().ok_or(AuthError::Internal("API key manager not configured".to_string()))?;
+    let user_context = extract_user_context(&req)?;
+
+    let api_key = api_key_manager
+        .create_api_key(Uuid::parse_str(&user_context.user_id).unwrap(), body.into_inner())
+        .await?;
+
+    Ok(HttpResponse::Created().json(api_key))
+}
+
+#[get("/api/v1/auth/api-keys")]
+async fn list_api_keys(
+    req: actix_web::HttpRequest,
+    state: Data<AppState>,
+) -> Result<impl Responder> {
+    let api_key_manager = state.api_key_manager.as_ref().ok_or(AuthError::Internal("API key manager not configured".to_string()))?;
+    let user_context = extract_user_context(&req)?;
+
+    let keys = api_key_manager
+        .list_user_keys(Uuid::parse_str(&user_context.user_id).unwrap())
+        .await?;
+
+    Ok(HttpResponse::Ok().json(keys))
+}
+
+#[delete("/api/v1/auth/api-keys/{key_id}")]
+async fn revoke_api_key(
+    req: actix_web::HttpRequest,
+    path: web::Path<Uuid>,
+    state: Data<AppState>,
+) -> Result<impl Responder> {
+    let api_key_manager = state.api_key_manager.as_ref().ok_or(AuthError::Internal("API key manager not configured".to_string()))?;
+    let user_context = extract_user_context(&req)?;
+    let key_id = path.into_inner();
+
+    api_key_manager
+        .revoke_key(Uuid::parse_str(&user_context.user_id).unwrap(), key_id)
+        .await?;
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "message": "API key revoked successfully"
+    })))
+}
+
+// ============================================================================
+// MFA Endpoints
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct MfaEnrollRequest {
+    // Empty - user_id extracted from JWT
+}
+
+#[derive(Debug, Serialize)]
+struct MfaEnrollResponse {
+    qr_code: String,
+    backup_codes: Vec<String>,
+}
+
+#[post("/api/v1/auth/mfa/enroll")]
+async fn mfa_enroll(
+    auth_header: web::Header<actix_web::http::header::Authorization<actix_web::http::header::authorization::Bearer>>,
+    state: Data<AppState>,
+) -> Result<impl Responder> {
+    let mfa_manager = state.mfa_manager.as_ref().ok_or(AuthError::Internal("MFA not configured".to_string()))?;
+
+    // Extract and verify JWT token
+    let token = auth_header.as_ref().token();
+    let claims = state.jwt_manager.verify_access_token(token)?;
+
+    // Check if token is revoked
+    if state.session_manager.is_token_revoked(&claims.jti).await? {
+        return Err(AuthError::Unauthorized);
+    }
+
+    let user_id = claims.sub;
+
+    // Initiate MFA enrollment
+    let (_secret, qr_code, backup_codes) = mfa_manager.initiate_enrollment(user_id).await?;
+
+    Ok(HttpResponse::Ok().json(MfaEnrollResponse {
+        qr_code,
+        backup_codes,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct MfaVerifyRequest {
+    code: String,
+}
+
+#[post("/api/v1/auth/mfa/verify")]
+async fn mfa_verify(
+    req: web::Json<MfaVerifyRequest>,
+    auth_header: web::Header<actix_web::http::header::Authorization<actix_web::http::header::authorization::Bearer>>,
+    state: Data<AppState>,
+) -> Result<impl Responder> {
+    let mfa_manager = state.mfa_manager.as_ref().ok_or(AuthError::Internal("MFA not configured".to_string()))?;
+
+    // Extract and verify JWT token
+    let token = auth_header.as_ref().token();
+    let claims = state.jwt_manager.verify_access_token(token)?;
+
+    // Check if token is revoked
+    if state.session_manager.is_token_revoked(&claims.jti).await? {
+        return Err(AuthError::Unauthorized);
+    }
+
+    let user_id = claims.sub;
+
+    // Check rate limit
+    let remaining = state.storage.check_mfa_rate_limit(&user_id).await?;
+    if remaining == 0 {
+        return Err(AuthError::RateLimitExceeded);
+    }
+
+    // Verify enrollment code
+    mfa_manager.verify_enrollment(&user_id, &req.code).await?;
+
+    // Reset rate limit on success
+    state.storage.reset_mfa_rate_limit(&user_id).await?;
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "message": "MFA enrollment verified successfully"
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MfaChallengeRequest {
+    code: String,
+}
+
+#[post("/api/v1/auth/mfa/challenge")]
+async fn mfa_challenge(
+    req: web::Json<MfaChallengeRequest>,
+    auth_header: web::Header<actix_web::http::header::Authorization<actix_web::http::header::authorization::Bearer>>,
+    state: Data<AppState>,
+) -> Result<impl Responder> {
+    let mfa_manager = state.mfa_manager.as_ref().ok_or(AuthError::Internal("MFA not configured".to_string()))?;
+
+    // Extract and verify JWT token
+    let token = auth_header.as_ref().token();
+    let claims = state.jwt_manager.verify_access_token(token)?;
+
+    // Check if token is revoked
+    if state.session_manager.is_token_revoked(&claims.jti).await? {
+        return Err(AuthError::Unauthorized);
+    }
+
+    let user_id = claims.sub;
+
+    // Check rate limit
+    let remaining = state.storage.check_mfa_rate_limit(&user_id).await?;
+    if remaining == 0 {
+        return Err(AuthError::RateLimitExceeded);
+    }
+
+    // Verify MFA code
+    let valid = mfa_manager.verify_challenge(&user_id, &req.code).await?;
+
+    if !valid {
+        return Err(AuthError::InvalidMfaCode);
+    }
+
+    // Reset rate limit on success
+    state.storage.reset_mfa_rate_limit(&user_id).await?;
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "message": "MFA challenge passed",
+        "authenticated": true
+    })))
+}
+
+// ============================================================================
 // Server Initialization
 // ============================================================================
 
@@ -477,8 +722,13 @@ pub async fn start_server(
     bind_address: &str,
     jwt_manager: Arc<JwtManager>,
     session_manager: Arc<SessionManager>,
+    token_family_manager: Arc<TokenFamilyManager>,
     oauth_config: OAuthConfig,
     storage: Arc<AuthStorage>,
+    redis_client: redis::Client,
+    rate_limit_config: RateLimitConfig,
+    mfa_manager: Option<Arc<MfaManager>>,
+    api_key_manager: Option<Arc<ApiKeyManager>>,
 ) -> std::io::Result<()> {
     let app_state = Data::new(AppState {
         jwt_manager,
@@ -487,12 +737,16 @@ pub async fn start_server(
         rbac_manager: Arc::new(RbacManager::new()),
         scope_manager: Arc::new(ScopeManager::new()),
         storage,
+        token_family_manager,
+        mfa_manager,
+        api_key_manager,
     });
 
     tracing::info!("Starting auth service on {}", bind_address);
 
     HttpServer::new(move || {
         App::new()
+            .wrap(RateLimitMiddleware::new(redis_client.clone(), rate_limit_config.clone()))
             .app_data(app_state.clone())
             .service(health_check)
             .service(authorize)
@@ -501,6 +755,14 @@ pub async fn start_server(
             .service(device_authorization)
             .service(approve_device)
             .service(device_poll)
+            .service(google_authorize)
+            .service(google_callback)
+            .service(create_api_key)
+            .service(list_api_keys)
+            .service(revoke_api_key)
+            .service(mfa_enroll)
+            .service(mfa_verify)
+            .service(mfa_challenge)
     })
     .bind(bind_address)?
     .run()

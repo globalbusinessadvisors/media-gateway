@@ -14,6 +14,7 @@ pub mod pipeline;
 pub mod qdrant;
 pub mod rate_limit;
 pub mod repository;
+pub mod webhooks;
 
 // Re-export main types
 pub use pipeline::{IngestionPipeline, IngestionSchedule};
@@ -24,12 +25,17 @@ pub use embedding::EmbeddingGenerator;
 pub use deep_link::{DeepLinkGenerator, DeepLinkResult};
 pub use qdrant::{QdrantClient, ContentPayload, ContentPoint, to_content_point, VECTOR_DIM};
 pub use rate_limit::RateLimitManager;
-pub use repository::{ContentRepository, PostgresContentRepository, ExpiringContent};
+pub use repository::{ContentRepository, PostgresContentRepository, ExpiringContent, StaleContent};
 pub use events::{
     KafkaEventProducer, EventProducer, ContentEvent,
     ContentIngestedEvent, ContentUpdatedEvent,
     AvailabilityChangedEvent, MetadataEnrichedEvent,
     EventError, EventResult,
+};
+pub use webhooks::{
+    WebhookReceiver, WebhookHandler, WebhookPayload, WebhookEventType,
+    WebhookQueue, RedisWebhookQueue, WebhookDeduplicator, WebhookMetrics,
+    ProcessedWebhook, ProcessingStatus, PlatformWebhookConfig,
 };
 
 /// Common error type for the ingestion pipeline
@@ -58,6 +64,19 @@ pub enum IngestionError {
 
     #[error("Configuration error: {0}")]
     ConfigError(String),
+
+    #[error("Webhook error: {0}")]
+    WebhookError(String),
+
+    #[error("External service error: {0}")]
+    External(String),
+
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, IngestionError>;
+pub type Error = IngestionError;

@@ -7,9 +7,12 @@ use crate::types::{Recommendation, RecommendationContext, RecommendationType, Sc
 use crate::profile::UserProfile;
 use crate::lora::{UserLoRAAdapter, compute_lora_score};
 use crate::diversity::ApplyDiversityFilter;
+use crate::graph::GraphRecommender;
+use crate::collaborative::CollaborativeFilteringEngine;
 use anyhow::Result;
 use uuid::Uuid;
 use chrono::Utc;
+use sqlx::PgPool;
 
 const COLLABORATIVE_WEIGHT: f32 = 0.35;
 const CONTENT_WEIGHT: f32 = 0.25;
@@ -38,13 +41,19 @@ impl GenerateRecommendations {
         context: Option<RecommendationContext>,
         lora_adapter: Option<&UserLoRAAdapter>,
         get_content_embedding: impl Fn(Uuid) -> Result<Vec<f32>>,
+        db_pool: Option<&PgPool>,
+        cf_engine: Option<&CollaborativeFilteringEngine>,
     ) -> Result<Vec<Recommendation>> {
         // Step 1: Generate candidate pool from multiple sources (parallel)
         // In a real implementation, these would be parallel async calls
         let mut all_candidates = Vec::new();
 
-        // Collaborative filtering candidates (simulated)
-        let collaborative_candidates = Self::get_collaborative_candidates(user_id, 100).await?;
+        // Collaborative filtering candidates (using ALS-based CF engine)
+        let collaborative_candidates = if let Some(engine) = cf_engine {
+            Self::get_collaborative_candidates_real(user_id, engine, 100).await?
+        } else {
+            Self::get_collaborative_candidates(user_id, 100).await?
+        };
         for mut candidate in collaborative_candidates {
             candidate.score *= COLLABORATIVE_WEIGHT;
             all_candidates.push(candidate);
@@ -57,8 +66,8 @@ impl GenerateRecommendations {
             all_candidates.push(candidate);
         }
 
-        // Graph-based candidates (simulated)
-        let graph_candidates = Self::get_graph_based_candidates(profile, 100).await?;
+        // Graph-based candidates
+        let graph_candidates = Self::get_graph_based_candidates(user_id, db_pool, 100).await?;
         for mut candidate in graph_candidates {
             candidate.score *= GRAPH_WEIGHT;
             all_candidates.push(candidate);
@@ -116,17 +125,36 @@ impl GenerateRecommendations {
                 explanation,
                 generated_at: Utc::now(),
                 ttl_seconds: 3600,
+                experiment_variant: None, // Will be set by A/B testing layer
             });
         }
 
         Ok(recommendations)
     }
 
+    async fn get_collaborative_candidates_real(
+        user_id: Uuid,
+        cf_engine: &CollaborativeFilteringEngine,
+        limit: usize,
+    ) -> Result<Vec<ScoredContent>> {
+        let recommendations = cf_engine.recommend(user_id, limit).await?;
+
+        Ok(recommendations
+            .into_iter()
+            .map(|(content_id, score)| ScoredContent {
+                content_id,
+                score,
+                source: RecommendationType::Collaborative,
+                based_on: vec!["collaborative_filtering".to_string()],
+            })
+            .collect())
+    }
+
     async fn get_collaborative_candidates(
         _user_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ScoredContent>> {
-        // Simulated collaborative filtering
+        // Simulated collaborative filtering (fallback)
         // In real implementation: query similar users and their preferences
         Ok(Vec::new())
     }
@@ -141,12 +169,27 @@ impl GenerateRecommendations {
     }
 
     async fn get_graph_based_candidates(
-        _profile: &UserProfile,
+        user_id: Uuid,
+        db_pool: Option<&PgPool>,
         limit: usize,
     ) -> Result<Vec<ScoredContent>> {
-        // Simulated graph-based filtering
-        // In real implementation: traverse content graph
-        Ok(Vec::new())
+        if let Some(pool) = db_pool {
+            let graph_recommender = GraphRecommender::new(pool.clone());
+            let recommendations = graph_recommender.recommend(user_id, limit).await?;
+
+            Ok(recommendations
+                .into_iter()
+                .map(|(content_id, score)| ScoredContent {
+                    content_id,
+                    score,
+                    source: RecommendationType::GraphBased,
+                    based_on: vec!["graph_similarity".to_string()],
+                })
+                .collect())
+        } else {
+            // Fallback if no DB pool provided
+            Ok(Vec::new())
+        }
     }
 
     async fn get_context_aware_candidates(
@@ -219,5 +262,14 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].score, 0.8);
         assert_eq!(merged[0].based_on.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_collaborative_candidates_fallback() {
+        let user_id = Uuid::new_v4();
+        let candidates = GenerateRecommendations::get_collaborative_candidates(user_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(candidates.len(), 0); // Fallback returns empty
     }
 }

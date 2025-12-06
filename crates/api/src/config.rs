@@ -24,6 +24,7 @@ pub struct ServicesConfig {
     pub sona: ServiceEndpoint,
     pub sync: ServiceEndpoint,
     pub auth: ServiceEndpoint,
+    pub playback: ServiceEndpoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +118,22 @@ impl Default for Config {
                 error_rate_threshold: 0.4,
             },
         );
+        circuit_breaker_services.insert(
+            "playback".to_string(),
+            CircuitBreakerServiceConfig {
+                failure_threshold: 15,
+                timeout_seconds: 3,
+                error_rate_threshold: 0.4,
+            },
+        );
+        circuit_breaker_services.insert(
+            "sync".to_string(),
+            CircuitBreakerServiceConfig {
+                failure_threshold: 15,
+                timeout_seconds: 3,
+                error_rate_threshold: 0.5,
+            },
+        );
 
         Self {
             server: ServerConfig {
@@ -141,6 +158,10 @@ impl Default for Config {
                 auth: ServiceEndpoint {
                     url: "http://localhost:8084".to_string(),
                     timeout_ms: 3000,
+                },
+                playback: ServiceEndpoint {
+                    url: "http://localhost:8086".to_string(),
+                    timeout_ms: 5000,
                 },
             },
             rate_limit: RateLimitConfig {
@@ -191,6 +212,10 @@ impl Config {
 
         if let Ok(auth_url) = std::env::var("AUTH_SERVICE_URL") {
             config.services.auth.url = auth_url;
+        }
+
+        if let Ok(playback_url) = std::env::var("PLAYBACK_SERVICE_URL") {
+            config.services.playback.url = playback_url;
         }
 
         Ok(config)

@@ -44,6 +44,9 @@ pub struct Recommendation {
     pub explanation: String,
     pub generated_at: DateTime<Utc>,
     pub ttl_seconds: u32,
+    /// A/B test experiment variant (if user is in an active experiment)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experiment_variant: Option<String>,
 }
 
 /// Recommendation type

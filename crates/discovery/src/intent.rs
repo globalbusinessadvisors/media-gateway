@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::cache::RedisCache;
 
 /// Natural Language Intent Parser
 /// Extracts search intent from user queries
@@ -10,6 +13,9 @@ pub struct IntentParser {
     /// API configuration
     api_url: String,
     api_key: String,
+
+    /// Redis cache for intent results
+    cache: Arc<RedisCache>,
 }
 
 /// Parsed search intent
@@ -57,24 +63,53 @@ pub enum IntentType {
 
 impl IntentParser {
     /// Create new intent parser
-    pub fn new(api_url: String, api_key: String) -> Self {
+    pub fn new(api_url: String, api_key: String, cache: Arc<RedisCache>) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_url,
             api_key,
+            cache,
         }
     }
 
     /// Parse natural language query into structured intent
     pub async fn parse(&self, query: &str) -> anyhow::Result<ParsedIntent> {
-        // Check cache first (TODO: implement caching)
+        // Normalize query for consistent cache keys
+        let normalized_query = query.trim().to_lowercase();
+
+        // Check cache first
+        match self.cache.get_intent::<String, ParsedIntent>(&normalized_query).await {
+            Ok(Some(cached_intent)) => {
+                tracing::debug!(query = %query, "Intent cache hit");
+                return Ok(cached_intent);
+            }
+            Ok(None) => {
+                tracing::debug!(query = %query, "Intent cache miss");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Cache lookup failed, continuing with GPT parsing");
+            }
+        }
 
         // Try GPT parsing
         match self.parse_with_gpt(query).await {
-            Ok(intent) => Ok(intent),
+            Ok(intent) => {
+                // Cache successful parse
+                if let Err(e) = self.cache.cache_intent(&normalized_query, &intent).await {
+                    tracing::warn!(error = %e, "Failed to cache intent");
+                }
+                Ok(intent)
+            }
             Err(e) => {
                 tracing::warn!("GPT parsing failed, using fallback: {}", e);
-                Ok(self.fallback_parse(query))
+                let fallback_intent = self.fallback_parse(query);
+
+                // Cache fallback result with lower confidence
+                if let Err(cache_err) = self.cache.cache_intent(&normalized_query, &fallback_intent).await {
+                    tracing::warn!(error = %cache_err, "Failed to cache fallback intent");
+                }
+
+                Ok(fallback_intent)
             }
         }
     }
@@ -264,28 +299,205 @@ Be conservative with confidence scores - only give high scores when intent is ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
-    #[test]
-    fn test_fallback_parse_genres() {
-        let parser = IntentParser::new(String::new(), String::new());
+    async fn create_test_cache() -> Arc<RedisCache> {
+        let config = Arc::new(crate::config::CacheConfig {
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            search_ttl_sec: 1800,
+            embedding_ttl_sec: 3600,
+            intent_ttl_sec: 600,
+        });
+
+        match RedisCache::new(config).await {
+            Ok(c) => Arc::new(c),
+            Err(e) => panic!("Redis required for tests: {}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fallback_parse_genres() {
+        let cache = create_test_cache().await;
+        let parser = IntentParser::new(String::new(), String::new(), cache);
         let intent = parser.fallback_parse("action comedy movies");
 
         assert_eq!(intent.filters.genre, vec!["action", "comedy"]);
     }
 
-    #[test]
-    fn test_fallback_parse_platforms() {
-        let parser = IntentParser::new(String::new(), String::new());
+    #[tokio::test]
+    async fn test_fallback_parse_platforms() {
+        let cache = create_test_cache().await;
+        let parser = IntentParser::new(String::new(), String::new(), cache);
         let intent = parser.fallback_parse("netflix shows");
 
         assert_eq!(intent.filters.platform, vec!["netflix"]);
     }
 
-    #[test]
-    fn test_extract_references() {
-        let parser = IntentParser::new(String::new(), String::new());
+    #[tokio::test]
+    async fn test_extract_references() {
+        let cache = create_test_cache().await;
+        let parser = IntentParser::new(String::new(), String::new(), cache);
         let references = parser.extract_references("movies like The Matrix");
 
         assert_eq!(references, vec!["The Matrix"]);
+    }
+
+    #[tokio::test]
+    async fn test_cache_hit() {
+        let config = Arc::new(crate::config::CacheConfig {
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            search_ttl_sec: 1800,
+            embedding_ttl_sec: 3600,
+            intent_ttl_sec: 600,
+        });
+
+        let cache = match RedisCache::new(config).await {
+            Ok(c) => Arc::new(c),
+            Err(_) => {
+                eprintln!("Skipping test: Redis not available");
+                return;
+            }
+        };
+
+        let parser = IntentParser::new(
+            String::new(),
+            String::new(),
+            cache.clone(),
+        );
+
+        let query = "action movies on netflix";
+        let normalized = query.trim().to_lowercase();
+
+        // First call should be cache miss
+        let intent = parser.fallback_parse(query);
+
+        // Manually cache it
+        cache.cache_intent(&normalized, &intent).await.unwrap();
+
+        // Second lookup should be cache hit
+        let cached: Option<ParsedIntent> = cache.get_intent(&normalized).await.unwrap();
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().filters.genre, intent.filters.genre);
+
+        // Cleanup
+        cache.clear_intent_cache().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cache_miss() {
+        let config = Arc::new(crate::config::CacheConfig {
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            search_ttl_sec: 1800,
+            embedding_ttl_sec: 3600,
+            intent_ttl_sec: 600,
+        });
+
+        let cache = match RedisCache::new(config).await {
+            Ok(c) => Arc::new(c),
+            Err(_) => {
+                eprintln!("Skipping test: Redis not available");
+                return;
+            }
+        };
+
+        let query = "unique query that should not be cached yet";
+        let normalized = query.trim().to_lowercase();
+
+        // Should be cache miss
+        let cached: Option<ParsedIntent> = cache.get_intent(&normalized).await.unwrap();
+        assert!(cached.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_query_normalization() {
+        let config = Arc::new(crate::config::CacheConfig {
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            search_ttl_sec: 1800,
+            embedding_ttl_sec: 3600,
+            intent_ttl_sec: 600,
+        });
+
+        let cache = match RedisCache::new(config).await {
+            Ok(c) => Arc::new(c),
+            Err(_) => {
+                eprintln!("Skipping test: Redis not available");
+                return;
+            }
+        };
+
+        let parser = IntentParser::new(
+            String::new(),
+            String::new(),
+            cache.clone(),
+        );
+
+        // Different case/whitespace should normalize to same key
+        let query1 = "  Action Movies  ";
+        let query2 = "action movies";
+        let query3 = "ACTION MOVIES";
+
+        let intent = parser.fallback_parse(query1);
+        cache.cache_intent(&query1.trim().to_lowercase(), &intent).await.unwrap();
+
+        // All variations should hit cache
+        let cached2: Option<ParsedIntent> = cache.get_intent(&query2.trim().to_lowercase()).await.unwrap();
+        let cached3: Option<ParsedIntent> = cache.get_intent(&query3.trim().to_lowercase()).await.unwrap();
+
+        assert!(cached2.is_some());
+        assert!(cached3.is_some());
+
+        // Cleanup
+        cache.clear_intent_cache().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cache_ttl() {
+        let config = Arc::new(crate::config::CacheConfig {
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            search_ttl_sec: 1800,
+            embedding_ttl_sec: 3600,
+            intent_ttl_sec: 1, // 1 second TTL for testing
+        });
+
+        let cache = match RedisCache::new(config).await {
+            Ok(c) => Arc::new(c),
+            Err(_) => {
+                eprintln!("Skipping test: Redis not available");
+                return;
+            }
+        };
+
+        let query = "ttl test query";
+        let normalized = query.trim().to_lowercase();
+        let intent = ParsedIntent {
+            mood: vec!["test".to_string()],
+            themes: vec![],
+            references: vec![],
+            filters: IntentFilters::default(),
+            fallback_query: query.to_string(),
+            confidence: 0.5,
+        };
+
+        // Cache with 1 second TTL
+        cache.cache_intent(&normalized, &intent).await.unwrap();
+
+        // Should be present immediately
+        let cached: Option<ParsedIntent> = cache.get_intent(&normalized).await.unwrap();
+        assert!(cached.is_some());
+
+        // Wait for expiration
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Should be expired
+        let cached_after: Option<ParsedIntent> = cache.get_intent(&normalized).await.unwrap();
+        assert!(cached_after.is_none());
+
+        // Cleanup
+        cache.clear_intent_cache().await.unwrap();
     }
 }

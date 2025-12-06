@@ -36,4 +36,3 @@ actix = "0.13"
 actix-web-actors = "4.3"
 parking_lot = "0.12"
 reqwest = { workspace = true }
-rusqlite = { version = "0.32", features = ["bundled"] }

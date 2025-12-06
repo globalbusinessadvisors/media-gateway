@@ -555,6 +555,27 @@ impl RedisCache {
             }
         }
     }
+
+    /// Create a mock cache for testing (no-op implementation)
+    #[cfg(test)]
+    pub fn new_mock() -> Self {
+        use redis::aio::ConnectionManager;
+        use redis::Client;
+
+        // Create a dummy client that will never be used
+        let client = Client::open("redis://127.0.0.1:6379").expect("Mock client creation");
+        // Note: ConnectionManager creation would fail, so we use unsafe for testing only
+        let manager = unsafe { std::mem::zeroed() };
+
+        let config = Arc::new(CacheConfig {
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            search_ttl_sec: 1800,
+            embedding_ttl_sec: 3600,
+            intent_ttl_sec: 600,
+        });
+
+        Self { manager, config }
+    }
 }
 
 /// Cache statistics for monitoring

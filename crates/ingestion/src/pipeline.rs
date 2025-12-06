@@ -51,6 +51,7 @@ pub struct IngestionPipeline {
     qdrant_client: Option<Arc<QdrantClient>>,
     rate_limiter: Arc<RateLimitManager>,
     repository: Arc<dyn ContentRepository>,
+    event_producer: Option<Arc<dyn crate::events::EventProducer>>,
     schedule: IngestionSchedule,
     regions: Vec<String>,
 }
@@ -75,6 +76,7 @@ impl IngestionPipeline {
             qdrant_client: None,
             rate_limiter: Arc::new(rate_limiter),
             repository: Arc::new(PostgresContentRepository::new(pool)),
+            event_producer: None,
             schedule,
             regions,
         }
@@ -86,6 +88,15 @@ impl IngestionPipeline {
     /// * `qdrant_client` - Optional Qdrant client for storing embeddings
     pub fn with_qdrant(mut self, qdrant_client: Option<QdrantClient>) -> Self {
         self.qdrant_client = qdrant_client.map(Arc::new);
+        self
+    }
+
+    /// Set the event producer for Kafka events
+    ///
+    /// # Arguments
+    /// * `event_producer` - Optional event producer for publishing events
+    pub fn with_event_producer(mut self, event_producer: Option<Arc<dyn crate::events::EventProducer>>) -> Self {
+        self.event_producer = event_producer;
         self
     }
 
@@ -164,6 +175,7 @@ impl IngestionPipeline {
         let normalizers = self.normalizers.clone();
         let rate_limiter = self.rate_limiter.clone();
         let repository = self.repository.clone();
+        let event_producer = self.event_producer.clone();
         let regions = self.regions.clone();
         let schedule_duration = self.schedule.availability_sync;
 
@@ -179,6 +191,7 @@ impl IngestionPipeline {
                             normalizer.clone(),
                             &rate_limiter,
                             repository.as_ref(),
+                            event_producer.as_ref(),
                             region,
                         ).await {
                             error!("Availability sync failed for {} in {}: {}",
@@ -226,6 +239,9 @@ impl IngestionPipeline {
     /// Spawn metadata enrichment task (every 24 hours)
     fn spawn_metadata_enrichment_task(&self) -> tokio::task::JoinHandle<()> {
         let embedding_generator = self.embedding_generator.clone();
+        let qdrant_client = self.qdrant_client.clone();
+        let repository = self.repository.clone();
+        let event_producer = self.event_producer.clone();
         let schedule_duration = self.schedule.metadata_enrichment;
 
         tokio::spawn(async move {
@@ -234,7 +250,12 @@ impl IngestionPipeline {
                 interval.tick().await;
                 info!("Starting metadata enrichment cycle");
 
-                if let Err(e) = Self::enrich_metadata(&embedding_generator).await {
+                if let Err(e) = Self::enrich_metadata(
+                    &embedding_generator,
+                    qdrant_client.as_ref().map(|c| c.as_ref()),
+                    repository.as_ref(),
+                    event_producer.as_ref(),
+                ).await {
                     error!("Metadata enrichment failed: {}", e);
                 }
 
@@ -352,6 +373,7 @@ impl IngestionPipeline {
         normalizer: Arc<dyn PlatformNormalizer>,
         rate_limiter: &RateLimitManager,
         repository: &dyn ContentRepository,
+        event_producer: Option<&Arc<dyn crate::events::EventProducer>>,
         region: &str,
     ) -> Result<()> {
         let platform_id = normalizer.platform_id();
@@ -363,13 +385,74 @@ impl IngestionPipeline {
         let since = Utc::now() - ChronoDuration::hours(1);
         let raw_items = normalizer.fetch_catalog_delta(since, region).await?;
 
-        // TODO: Extract availability information from raw_items and update database
-        // Process each raw item:
-        // 1. Normalize to CanonicalContent to get availability info
-        // 2. Look up content by platform_content_id and platform_id
-        // 3. Update availability.regions, subscription_required, prices, available_until
-        // RawContent structure: { id, platform, data (JSON), fetched_at }
-        // Need to normalize each item to extract availability details
+        // Process each raw item to extract and update availability
+        for raw in raw_items {
+            // Normalize to extract availability information
+            let canonical = match normalizer.normalize(raw) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Failed to normalize content for availability sync: {}", e);
+                    continue;
+                }
+            };
+
+            // Look up content by platform_content_id and platform_id
+            let content_id = match repository.find_by_platform_id(
+                &canonical.platform_content_id,
+                &canonical.platform_id,
+            ).await {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    debug!(
+                        "Content not found for platform_id={} content_id={}",
+                        canonical.platform_id, canonical.platform_content_id
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!("Failed to lookup content: {}", e);
+                    continue;
+                }
+            };
+
+            let availability = &canonical.availability;
+
+            // Determine availability status
+            let is_available = !availability.regions.is_empty();
+
+            // Update availability in database
+            if let Err(e) = repository.update_availability(
+                content_id,
+                &canonical.platform_id,
+                region,
+                is_available,
+                availability.available_until,
+            ).await {
+                warn!("Failed to update availability for content {}: {}", content_id, e);
+                continue;
+            }
+
+            // Emit AvailabilityChangedEvent via Kafka if producer is available
+            if let Some(producer) = event_producer {
+                use crate::events::{AvailabilityChangedEvent, ContentEvent};
+
+                let mut event = AvailabilityChangedEvent::new(
+                    content_id,
+                    canonical.platform_id.clone(),
+                    is_available,
+                    false, // We don't track previous state in this context
+                    availability.regions.clone(),
+                );
+
+                if let Some(expires_at) = availability.available_until {
+                    event = event.with_expiration(expires_at);
+                }
+
+                if let Err(e) = producer.publish_event(ContentEvent::AvailabilityChanged(event)).await {
+                    warn!("Failed to publish availability changed event: {}", e);
+                }
+            }
+        }
 
         debug!("Updated availability for {} items from {}", raw_items.len(), platform_id);
 
@@ -404,12 +487,183 @@ impl IngestionPipeline {
     /// Enrich metadata with updated embeddings
     async fn enrich_metadata(
         embedding_generator: &EmbeddingGenerator,
+        qdrant_client: Option<&QdrantClient>,
+        repository: &dyn ContentRepository,
+        event_producer: Option<&Arc<dyn crate::events::EventProducer>>,
     ) -> Result<()> {
-        // TODO: Query database for content needing enrichment
-        // TODO: Regenerate embeddings for stale content
-        // TODO: Update quality scores
+        // Query for content with stale embeddings (older than 7 days)
+        let stale_threshold = Utc::now() - ChronoDuration::days(7);
+        let stale_content = repository.find_stale_embeddings(stale_threshold).await
+            .map_err(|e| IngestionError::DatabaseError(e.to_string()))?;
+
+        if stale_content.is_empty() {
+            info!("No stale content found for enrichment");
+            return Ok(());
+        }
+
+        info!("Found {} content items with stale embeddings", stale_content.len());
+
+        // Process in batches of 100 items
+        const BATCH_SIZE: usize = 100;
+        let mut total_enriched = 0;
+        let mut total_quality_computed = 0;
+
+        for (batch_idx, batch) in stale_content.chunks(BATCH_SIZE).enumerate() {
+            info!(
+                "Processing enrichment batch {}/{} ({} items)",
+                batch_idx + 1,
+                (stale_content.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                batch.len()
+            );
+
+            let mut qdrant_points = Vec::new();
+            let mut events = Vec::new();
+
+            for item in batch {
+                // Regenerate embedding
+                match embedding_generator.generate(&item.content).await {
+                    Ok(embedding) => {
+                        // Update embedding in database
+                        if let Err(e) = repository.update_embedding(item.content_id, &embedding).await {
+                            warn!("Failed to update embedding for content {}: {}", item.content_id, e);
+                            continue;
+                        }
+
+                        // Prepare Qdrant point for batch upsert
+                        if qdrant_client.is_some() {
+                            let mut content_with_embedding = item.content.clone();
+                            content_with_embedding.embedding = Some(embedding.clone());
+
+                            match to_content_point(&content_with_embedding, item.content_id) {
+                                Ok(point) => qdrant_points.push(point),
+                                Err(e) => warn!("Failed to create Qdrant point for {}: {}", item.content_id, e),
+                            }
+                        }
+
+                        // Compute quality score
+                        let quality_score = Self::compute_quality_score(&item.content);
+                        if let Err(e) = repository.update_quality_score(item.content_id, quality_score).await {
+                            warn!("Failed to update quality score for content {}: {}", item.content_id, e);
+                        } else {
+                            total_quality_computed += 1;
+                        }
+
+                        // Create metadata enrichment event
+                        let enriched_fields = vec![
+                            "embedding".to_string(),
+                            "quality_score".to_string(),
+                        ];
+
+                        events.push(crate::events::ContentEvent::MetadataEnriched(
+                            crate::events::MetadataEnrichedEvent::new(
+                                item.content_id,
+                                "embedding_generator".to_string(),
+                                enriched_fields,
+                                quality_score,
+                            )
+                        ));
+
+                        total_enriched += 1;
+                        debug!("Enriched metadata for content: {} ({})", item.content.title, item.content_id);
+                    }
+                    Err(e) => {
+                        warn!("Failed to generate embedding for content {}: {}", item.content_id, e);
+                        continue;
+                    }
+                }
+            }
+
+            // Batch upsert to Qdrant
+            if let Some(client) = qdrant_client {
+                if !qdrant_points.is_empty() {
+                    if let Err(e) = client.upsert_batch(qdrant_points).await {
+                        error!("Failed to upsert batch to Qdrant: {}", e);
+                    } else {
+                        debug!("Updated {} vectors in Qdrant", batch.len());
+                    }
+                }
+            }
+
+            // Publish metadata enrichment events
+            if let Some(producer) = event_producer {
+                if let Err(e) = producer.publish_batch(events).await {
+                    warn!("Failed to publish metadata enrichment events: {}", e);
+                }
+            }
+
+            info!(
+                "Completed batch {}/{}: enriched {} items, computed {} quality scores",
+                batch_idx + 1,
+                (stale_content.len() + BATCH_SIZE - 1) / BATCH_SIZE,
+                batch.len(),
+                batch.len()
+            );
+        }
+
+        info!(
+            "Metadata enrichment completed: {} embeddings regenerated, {} quality scores computed",
+            total_enriched,
+            total_quality_computed
+        );
 
         Ok(())
+    }
+
+    /// Compute quality score based on metadata completeness
+    ///
+    /// Score ranges from 0.0 to 1.0 based on:
+    /// - Has title: 0.1
+    /// - Has overview: 0.2
+    /// - Has release year: 0.1
+    /// - Has runtime: 0.1
+    /// - Has genres: 0.2
+    /// - Has rating: 0.1
+    /// - Has user rating: 0.1
+    /// - Has embedding: 0.1
+    fn compute_quality_score(content: &CanonicalContent) -> f64 {
+        let mut score = 0.0;
+
+        // Title (always present, but check if non-empty)
+        if !content.title.is_empty() {
+            score += 0.1;
+        }
+
+        // Overview
+        if content.overview.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+            score += 0.2;
+        }
+
+        // Release year
+        if content.release_year.is_some() {
+            score += 0.1;
+        }
+
+        // Runtime
+        if content.runtime_minutes.is_some() {
+            score += 0.1;
+        }
+
+        // Genres (at least one)
+        if !content.genres.is_empty() {
+            score += 0.2;
+        }
+
+        // Rating
+        if content.rating.is_some() {
+            score += 0.1;
+        }
+
+        // User rating
+        if content.user_rating.is_some() {
+            score += 0.1;
+        }
+
+        // Embedding
+        if content.embedding.is_some() {
+            score += 0.1;
+        }
+
+        score
     }
 }
 

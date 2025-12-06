@@ -15,9 +15,12 @@
 //! - `math`: Mathematical utilities for vector operations
 //! - `metrics`: Prometheus metrics collection and exposition
 //! - `observability`: Structured logging and distributed tracing
+//! - `telemetry`: OpenTelemetry distributed tracing with OTLP exporters
 //! - `health`: Production-ready health check system
 //! - `config`: Configuration loading and validation
 //! - `retry`: Exponential backoff retry utilities
+//! - `pagination`: Pagination utilities for API endpoints
+//! - `shutdown`: Graceful shutdown coordinator
 
 pub mod config;
 pub mod database;
@@ -27,7 +30,11 @@ pub mod math;
 pub mod metrics;
 pub mod models;
 pub mod observability;
+pub mod pagination;
+pub mod resilience;
 pub mod retry;
+pub mod shutdown;
+pub mod telemetry;
 pub mod types;
 pub mod validation;
 
@@ -55,7 +62,18 @@ pub use observability::{
     api_span, current_correlation_id, db_span, init_logging, request_span, with_correlation_id,
     LogConfig, LogFormat, ObservabilityError,
 };
+pub use pagination::{
+    decode_cursor, encode_cursor, PaginatedResponse, PaginationLinks, PaginationParams,
+    PaginationType, DEFAULT_LIMIT, MAX_LIMIT,
+};
+pub use resilience::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState};
 pub use retry::{retry_with_backoff, RetryPolicy};
+pub use shutdown::{ShutdownConfig, ShutdownCoordinator, ShutdownHandle};
+pub use telemetry::{
+    TracingConfig, TelemetryError, init_tracing, shutdown_tracing,
+    create_span, db_query_span, redis_op_span, external_api_span,
+    TracingMiddleware, extract_trace_context, inject_trace_context, TraceContext,
+};
 pub use types::*;
 
 /// Result type alias for Media Gateway operations

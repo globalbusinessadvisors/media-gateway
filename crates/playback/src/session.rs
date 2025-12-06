@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use crate::events::{
     PlaybackEventProducer, SessionCreatedEvent, PositionUpdatedEvent, SessionEndedEvent
 };
+use crate::watch_history::WatchHistoryManager;
 
 const SESSION_TTL_SECS: u64 = 86400; // 24 hours
 
@@ -64,6 +65,14 @@ pub struct CreateSessionRequest {
     pub quality: Option<VideoQuality>,
 }
 
+/// Response when creating a session
+#[derive(Debug, Serialize)]
+pub struct CreateSessionResponse {
+    #[serde(flatten)]
+    pub session: PlaybackSession,
+    pub resume_position_seconds: Option<u32>,
+}
+
 /// Request to update playback position
 #[derive(Debug, Deserialize)]
 pub struct UpdatePositionRequest {
@@ -77,6 +86,7 @@ pub struct SessionManager {
     sync_service_url: String,
     http_client: reqwest::Client,
     event_producer: Arc<dyn PlaybackEventProducer>,
+    watch_history: Option<Arc<WatchHistoryManager>>,
 }
 
 impl SessionManager {
@@ -96,7 +106,14 @@ impl SessionManager {
             sync_service_url,
             http_client,
             event_producer,
+            watch_history: None,
         })
+    }
+
+    /// Set watch history manager for resume position tracking
+    pub fn with_watch_history(mut self, watch_history: Arc<WatchHistoryManager>) -> Self {
+        self.watch_history = Some(watch_history);
+        self
     }
 
     pub fn from_env() -> Result<Self, redis::RedisError> {
@@ -118,17 +135,60 @@ impl SessionManager {
                 }
             };
 
-        Self::new(&redis_url, sync_service_url, event_producer)
+        let mut manager = Self::new(&redis_url, sync_service_url, event_producer)?;
+
+        // Initialize watch history manager if DATABASE_URL is set
+        if let Ok(database_url) = std::env::var("DATABASE_URL") {
+            use sqlx::postgres::PgPoolOptions;
+
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    PgPoolOptions::new()
+                        .max_connections(5)
+                        .connect(&database_url)
+                        .await
+                })
+            }) {
+                Ok(pool) => {
+                    let watch_history = Arc::new(WatchHistoryManager::new(pool));
+                    manager = manager.with_watch_history(watch_history);
+                    tracing::info!("Watch history manager initialized");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize watch history manager: {}", e);
+                }
+            }
+        } else {
+            tracing::warn!("DATABASE_URL not set, watch history disabled");
+        }
+
+        Ok(manager)
     }
 
     async fn get_conn(&self) -> Result<MultiplexedConnection, redis::RedisError> {
         self.client.get_multiplexed_async_connection().await
     }
 
-    /// Create new playback session
-    pub async fn create(&self, request: CreateSessionRequest) -> Result<PlaybackSession, SessionError> {
+    /// Create new playback session with resume position support
+    pub async fn create(&self, request: CreateSessionRequest) -> Result<CreateSessionResponse, SessionError> {
         let mut conn = self.get_conn().await
             .map_err(|e| SessionError::Storage(e.to_string()))?;
+
+        // Query watch history for resume position
+        let resume_position_seconds = if let Some(watch_history) = &self.watch_history {
+            match watch_history
+                .get_resume_position(request.user_id, request.content_id)
+                .await
+            {
+                Ok(pos) => pos,
+                Err(e) => {
+                    tracing::warn!("Failed to get resume position: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let now = Utc::now();
         let session = PlaybackSession {
@@ -179,7 +239,10 @@ impl SessionManager {
             }
         });
 
-        Ok(session)
+        Ok(CreateSessionResponse {
+            session,
+            resume_position_seconds,
+        })
     }
 
     /// Get session by ID
@@ -202,7 +265,7 @@ impl SessionManager {
         }
     }
 
-    /// Update playback position
+    /// Update playback position and watch history
     pub async fn update_position(
         &self,
         session_id: Uuid,
@@ -240,6 +303,21 @@ impl SessionManager {
         conn.set_ex(&key, value, ttl)
             .await
             .map_err(|e| SessionError::Storage(e.to_string()))?;
+
+        // Update watch history
+        if let Some(watch_history) = &self.watch_history {
+            let user_id = session.user_id;
+            let content_id = session.content_id;
+            let position = session.position_seconds;
+            let duration = session.duration_seconds;
+            let wh = watch_history.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = wh.update_watch_history(user_id, content_id, position, duration).await {
+                    tracing::error!("Failed to update watch history: {}", e);
+                }
+            });
+        }
 
         // Fire-and-forget call to sync service
         self.notify_sync_service(&session).await;
@@ -299,7 +377,7 @@ impl SessionManager {
         });
     }
 
-    /// Delete session
+    /// Delete session and update final watch history
     pub async fn delete(&self, session_id: Uuid) -> Result<(), SessionError> {
         let session = self.get(session_id).await?;
 
@@ -317,6 +395,21 @@ impl SessionManager {
             conn.srem(&user_key, session_id.to_string())
                 .await
                 .map_err(|e| SessionError::Storage(e.to_string()))?;
+
+            // Final update to watch history
+            if let Some(watch_history) = &self.watch_history {
+                let user_id = s.user_id;
+                let content_id = s.content_id;
+                let position = s.position_seconds;
+                let duration = s.duration_seconds;
+                let wh = watch_history.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = wh.update_watch_history(user_id, content_id, position, duration).await {
+                        tracing::error!("Failed to update final watch history: {}", e);
+                    }
+                });
+            }
 
             // Calculate completion rate
             let completion_rate = if s.duration_seconds > 0 {

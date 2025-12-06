@@ -125,6 +125,7 @@ impl ServiceProxy {
             "sona" => &self.config.services.sona.url,
             "sync" => &self.config.services.sync.url,
             "auth" => &self.config.services.auth.url,
+            "playback" => &self.config.services.playback.url,
             _ => {
                 return Err(ApiError::BadRequest(format!(
                     "Unknown service: {}",
@@ -161,6 +162,7 @@ mod tests {
         assert!(proxy.get_service_url("sona").is_ok());
         assert!(proxy.get_service_url("sync").is_ok());
         assert!(proxy.get_service_url("auth").is_ok());
+        assert!(proxy.get_service_url("playback").is_ok());
         assert!(proxy.get_service_url("invalid").is_err());
     }
 }

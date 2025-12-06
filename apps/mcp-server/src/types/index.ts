@@ -126,3 +126,47 @@ export interface Platform {
   regions: string[];
   deepLinkPattern?: string;
 }
+
+/**
+ * MCP Protocol 2024-11-05 - Extended Types
+ */
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface LoggingSetLevelParams {
+  level: LogLevel;
+}
+
+export interface LoggingSetLevelResult {
+  previousLevel: LogLevel;
+  currentLevel: LogLevel;
+}
+
+export interface CancelledNotificationParams {
+  requestId: string;
+  reason?: string;
+}
+
+export interface CompletionReference {
+  type: 'ref/resource' | 'ref/prompt';
+  uri?: string;
+  name?: string;
+}
+
+export interface CompletionArgument {
+  name: string;
+  value: string;
+}
+
+export interface CompletionCompleteParams {
+  ref: CompletionReference;
+  argument: CompletionArgument;
+}
+
+export interface CompletionResult {
+  completion: {
+    values: string[];
+    hasMore: boolean;
+    total?: number;
+  };
+}

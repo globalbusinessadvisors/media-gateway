@@ -4,10 +4,12 @@
 //! Provides per-user personalization with ~10KB memory footprint per user.
 
 use crate::types::ViewingEvent;
+use crate::inference::ONNXInference;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use ndarray::{Array1, Array2};
 use uuid::Uuid;
+use std::sync::Arc;
 
 const LORA_RANK: usize = 8;
 const LORA_ALPHA: f32 = 16.0;
@@ -83,6 +85,65 @@ impl UserLoRAAdapter {
 pub struct UpdateUserLoRA;
 
 impl UpdateUserLoRA {
+    /// Execute LoRA training with real embeddings from ONNX inference
+    pub async fn execute_with_inference(
+        adapter: &mut UserLoRAAdapter,
+        recent_events: &[ViewingEvent],
+        inference: Arc<ONNXInference>,
+        get_content_text: impl Fn(Uuid) -> Result<String>,
+        preference_vector: &[f32],
+    ) -> Result<()> {
+        // Check if enough new data for training
+        if recent_events.len() < MIN_TRAINING_EVENTS {
+            return Ok(());
+        }
+
+        // Prepare training data with real embeddings
+        let mut training_pairs = Vec::new();
+        for event in recent_events {
+            let content_text = get_content_text(event.content_id)?;
+            let content_embedding = inference.generate_embedding(&content_text).await?;
+            let engagement_label = Self::calculate_engagement_label(event);
+            training_pairs.push((content_embedding, engagement_label));
+        }
+
+        // LoRA training loop (few-shot adaptation)
+        for iteration in 0..5 {
+            let mut total_loss = 0.0;
+
+            for (embedding, label) in &training_pairs {
+                // Forward pass through LoRA
+                let lora_output = ComputeLoRAForward::execute(adapter, embedding)?;
+
+                // Predicted engagement (dot product + sigmoid)
+                let predicted = Self::sigmoid(
+                    Self::dot_product(&lora_output, preference_vector)
+                );
+
+                // Binary cross-entropy loss
+                let loss = -label * predicted.ln() - (1.0 - label) * (1.0 - predicted).ln();
+                total_loss += loss;
+
+                // Backward pass (gradient descent on user layer only)
+                let gradient_scalar = predicted - label;
+                Self::update_user_layer_gradients(
+                    adapter,
+                    embedding,
+                    gradient_scalar,
+                )?;
+            }
+
+            let avg_loss = total_loss / training_pairs.len() as f32;
+            tracing::debug!("LoRA training iteration {}: avg_loss={}", iteration, avg_loss);
+        }
+
+        adapter.last_trained_time = Utc::now();
+        adapter.training_iterations += 1;
+
+        Ok(())
+    }
+
+    /// Legacy method - kept for backward compatibility
     pub async fn execute(
         adapter: &mut UserLoRAAdapter,
         recent_events: &[ViewingEvent],

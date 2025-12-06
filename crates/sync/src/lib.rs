@@ -12,7 +12,9 @@
 pub mod command_router;
 pub mod crdt;
 pub mod device;
+pub mod persistence;
 pub mod pubnub;
+pub mod repository;
 pub mod server;
 pub mod sync;
 pub mod websocket;
@@ -23,7 +25,9 @@ pub use device::{
     AudioCodec, CommandError, CommandType, DeviceCapabilities, DeviceHandoff, DeviceInfo, DevicePlatform,
     DeviceRegistry, DeviceType, HDRFormat, RemoteCommand, VideoResolution,
 };
+pub use persistence::SyncPersistence;
 pub use pubnub::{DeviceMessage, PubNubClient, PubNubConfig, PubNubError, SyncMessage};
+pub use repository::{PostgresSyncRepository, SyncRepository};
 pub use server::{start_server, ServerState};
 pub use sync::{
     OfflineSyncQueue, ProgressSync, ProgressUpdate, QueueError, SyncOperation, SyncReport,

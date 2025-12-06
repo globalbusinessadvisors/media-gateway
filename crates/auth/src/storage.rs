@@ -263,6 +263,52 @@ impl AuthStorage {
             Err(_) => false,
         }
     }
+
+    // ========== MFA Rate Limiting ==========
+
+    /// Check and increment MFA verification attempts
+    /// Returns remaining attempts (0 means rate limited)
+    pub async fn check_mfa_rate_limit(&self, user_id: &str) -> Result<u32> {
+        let mut conn = self.get_conn().await?;
+        let key = format!("mfa:attempts:{}", user_id);
+        let max_attempts = 5;
+        let window_secs = 60;
+
+        // Get current count
+        let count: Option<u32> = conn.get(&key)
+            .await
+            .map_err(|e| AuthError::Internal(format!("Redis GET error: {}", e)))?;
+
+        let current = count.unwrap_or(0);
+
+        if current >= max_attempts {
+            return Ok(0);
+        }
+
+        // Increment counter
+        let new_count: u32 = conn.incr(&key, 1)
+            .await
+            .map_err(|e| AuthError::Internal(format!("Redis INCR error: {}", e)))?;
+
+        // Set expiry on first attempt
+        if new_count == 1 {
+            conn.expire(&key, window_secs)
+                .await
+                .map_err(|e| AuthError::Internal(format!("Redis EXPIRE error: {}", e)))?;
+        }
+
+        Ok(max_attempts.saturating_sub(new_count))
+    }
+
+    /// Reset MFA rate limit for user
+    pub async fn reset_mfa_rate_limit(&self, user_id: &str) -> Result<()> {
+        let mut conn = self.get_conn().await?;
+        let key = format!("mfa:attempts:{}", user_id);
+        conn.del(&key)
+            .await
+            .map_err(|e| AuthError::Internal(format!("Redis DEL error: {}", e)))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

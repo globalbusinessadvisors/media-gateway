@@ -18,6 +18,8 @@ pub struct Claims {
     pub exp: i64,           // Expiration
     pub jti: String,        // JWT ID (unique identifier)
     pub token_type: String, // "access" or "refresh"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_family_id: Option<Uuid>, // Token family for refresh token rotation tracking
 }
 
 impl Claims {
@@ -32,6 +34,7 @@ impl Claims {
             exp: now + ACCESS_TOKEN_TTL,
             jti: Uuid::new_v4().to_string(),
             token_type: "access".to_string(),
+            token_family_id: None, // Access tokens don't need family tracking
         }
     }
 
@@ -46,6 +49,29 @@ impl Claims {
             exp: now + REFRESH_TOKEN_TTL,
             jti: Uuid::new_v4().to_string(),
             token_type: "refresh".to_string(),
+            token_family_id: None, // Set externally after family creation
+        }
+    }
+
+    /// Create a new refresh token with a specific token family ID
+    pub fn new_refresh_token_with_family(
+        user_id: String,
+        email: Option<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        family_id: Uuid,
+    ) -> Self {
+        let now = chrono::Utc::now().timestamp();
+        Self {
+            sub: user_id,
+            email,
+            roles,
+            scopes,
+            iat: now,
+            exp: now + REFRESH_TOKEN_TTL,
+            jti: Uuid::new_v4().to_string(),
+            token_type: "refresh".to_string(),
+            token_family_id: Some(family_id),
         }
     }
 
@@ -117,6 +143,19 @@ impl JwtManager {
         scopes: Vec<String>,
     ) -> Result<String> {
         let claims = Claims::new_refresh_token(user_id, email, roles, scopes);
+        self.encode_token(&claims)
+    }
+
+    /// Generate refresh token with a specific token family ID
+    pub fn create_refresh_token_with_family(
+        &self,
+        user_id: String,
+        email: Option<String>,
+        roles: Vec<String>,
+        scopes: Vec<String>,
+        family_id: Uuid,
+    ) -> Result<String> {
+        let claims = Claims::new_refresh_token_with_family(user_id, email, roles, scopes, family_id);
         self.encode_token(&claims)
     }
 

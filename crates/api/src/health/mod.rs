@@ -1,3 +1,9 @@
+pub mod aggregator;
+
+pub use aggregator::{
+    AggregatedHealth, DependencyHealth, HealthAggregator, HealthStatus, ServiceHealth,
+};
+
 use crate::circuit_breaker::CircuitBreakerManager;
 use crate::proxy::ServiceProxy;
 use actix_web::{web, HttpResponse, Responder};
@@ -10,11 +16,11 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub uptime_seconds: u64,
-    pub checks: HashMap<String, ServiceHealth>,
+    pub checks: HashMap<String, ServiceHealthCheck>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ServiceHealth {
+pub struct ServiceHealthCheck {
     pub status: String,
     pub circuit_breaker: Option<String>,
 }
@@ -32,10 +38,7 @@ pub struct HealthChecker {
 }
 
 impl HealthChecker {
-    pub fn new(
-        proxy: Arc<ServiceProxy>,
-        circuit_breaker: Arc<CircuitBreakerManager>,
-    ) -> Self {
+    pub fn new(proxy: Arc<ServiceProxy>, circuit_breaker: Arc<CircuitBreakerManager>) -> Self {
         Self {
             proxy,
             circuit_breaker,
@@ -46,22 +49,15 @@ impl HealthChecker {
     pub async fn health_check(&self) -> HealthResponse {
         let mut checks = HashMap::new();
 
-        // Check discovery service
         checks.insert(
             "discovery".to_string(),
             self.check_service("discovery").await,
         );
-
-        // Check SONA service
         checks.insert("sona".to_string(), self.check_service("sona").await);
-
-        // Check sync service
         checks.insert("sync".to_string(), self.check_service("sync").await);
-
-        // Check auth service
         checks.insert("auth".to_string(), self.check_service("auth").await);
+        checks.insert("playback".to_string(), self.check_service("playback").await);
 
-        // Overall status is healthy if at least one critical service is up
         let critical_services = ["discovery", "auth"];
         let status = if critical_services
             .iter()
@@ -83,10 +79,12 @@ impl HealthChecker {
     pub async fn readiness_check(&self) -> ReadinessResponse {
         let mut services = HashMap::new();
 
-        // Check all services
         services.insert(
             "discovery".to_string(),
-            self.proxy.get_service_health("discovery").await.unwrap_or(false),
+            self.proxy
+                .get_service_health("discovery")
+                .await
+                .unwrap_or(false),
         );
         services.insert(
             "sona".to_string(),
@@ -100,25 +98,30 @@ impl HealthChecker {
             "auth".to_string(),
             self.proxy.get_service_health("auth").await.unwrap_or(false),
         );
+        services.insert(
+            "playback".to_string(),
+            self.proxy
+                .get_service_health("playback")
+                .await
+                .unwrap_or(false),
+        );
 
-        // Ready if all services are up
         let ready = services.values().all(|&v| v);
 
         ReadinessResponse { ready, services }
     }
 
-    async fn check_service(&self, service: &str) -> ServiceHealth {
+    async fn check_service(&self, service: &str) -> ServiceHealthCheck {
         let health = self.proxy.get_service_health(service).await.unwrap_or(false);
         let circuit_state = self.circuit_breaker.get_state(service).await;
 
-        ServiceHealth {
+        ServiceHealthCheck {
             status: if health { "healthy" } else { "unhealthy" }.to_string(),
             circuit_breaker: circuit_state,
         }
     }
 }
 
-// Handler functions
 pub async fn health(checker: web::Data<HealthChecker>) -> impl Responder {
     let health = checker.health_check().await;
     let status_code = if health.status == "healthy" {
@@ -145,4 +148,24 @@ pub async fn liveness() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "status": "alive"
     }))
+}
+
+pub async fn aggregate(aggregator: web::Data<HealthAggregator>) -> impl Responder {
+    match aggregator.check_health().await {
+        Ok(health) => {
+            let status_code = match health.status {
+                HealthStatus::Healthy => actix_web::http::StatusCode::OK,
+                HealthStatus::Degraded => actix_web::http::StatusCode::OK,
+                HealthStatus::Unhealthy => actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+            };
+            HttpResponse::build(status_code).json(health)
+        }
+        Err(e) => {
+            tracing::error!("Health aggregation failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "status": "unhealthy",
+                "error": e.to_string()
+            }))
+        }
+    }
 }

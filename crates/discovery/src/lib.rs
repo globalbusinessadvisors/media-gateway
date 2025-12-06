@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod cache;
 pub mod config;
 pub mod embedding;
@@ -5,6 +6,7 @@ pub mod intent;
 pub mod search;
 pub mod server;
 
+pub use analytics::{SearchAnalytics, AnalyticsDashboard, PopularQuery, ZeroResultQuery};
 pub use cache::{CacheError, CacheStats, RedisCache};
 pub use config::DiscoveryConfig;
 pub use embedding::EmbeddingService;
@@ -26,10 +28,20 @@ pub async fn init_service(
         .connect(&config.database.url)
         .await?;
 
-    // Initialize intent parser
+    // Initialize Redis cache
+    let cache_config = Arc::new(crate::config::CacheConfig {
+        redis_url: config.cache.redis_url.clone(),
+        search_ttl_sec: config.cache.search_ttl_sec,
+        embedding_ttl_sec: config.cache.embedding_ttl_sec,
+        intent_ttl_sec: config.cache.intent_ttl_sec,
+    });
+    let cache = Arc::new(RedisCache::new(cache_config).await?);
+
+    // Initialize intent parser with cache
     let intent_parser = Arc::new(IntentParser::new(
         config.embedding.api_url.clone(),
         config.embedding.api_key.clone(),
+        cache.clone(),
     ));
 
     // Initialize vector search
@@ -51,6 +63,7 @@ pub async fn init_service(
         vector_search,
         keyword_search,
         db_pool,
+        cache,
     ));
 
     Ok(search_service)

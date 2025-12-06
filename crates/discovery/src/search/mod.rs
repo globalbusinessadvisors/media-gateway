@@ -5,14 +5,23 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument};
 use uuid::Uuid;
 
+pub mod autocomplete;
+pub mod facets;
 pub mod filters;
 pub mod keyword;
+pub mod personalization;
+pub mod query_processor;
 pub mod vector;
 
+pub use autocomplete::AutocompleteService;
+pub use facets::{FacetCount, FacetService};
 pub use filters::SearchFilters;
 pub use keyword::KeywordSearch;
+pub use personalization::PersonalizationService;
+pub use query_processor::QueryProcessor;
 pub use vector::VectorSearch;
 
+use crate::analytics::SearchAnalytics;
 use crate::cache::RedisCache;
 use crate::config::DiscoveryConfig;
 use crate::intent::{IntentParser, ParsedIntent};
@@ -25,6 +34,9 @@ pub struct HybridSearchService {
     keyword_search: Arc<keyword::KeywordSearch>,
     db_pool: sqlx::PgPool,
     cache: Arc<RedisCache>,
+    facet_service: Arc<FacetService>,
+    personalization_service: Arc<PersonalizationService>,
+    analytics: Option<Arc<SearchAnalytics>>,
 }
 
 /// Search request
@@ -35,6 +47,9 @@ pub struct SearchRequest {
     pub page: u32,
     pub page_size: u32,
     pub user_id: Option<Uuid>,
+    /// A/B test experiment variant (e.g., "control", "low_boost", "high_boost")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experiment_variant: Option<String>,
 }
 
 /// Search response
@@ -46,6 +61,8 @@ pub struct SearchResponse {
     pub page_size: u32,
     pub query_parsed: ParsedIntent,
     pub search_time_ms: u64,
+    /// Facet counts by dimension (genres, platforms, years, ratings)
+    pub facets: HashMap<String, Vec<FacetCount>>,
 }
 
 /// Individual search result
@@ -81,6 +98,15 @@ impl HybridSearchService {
         db_pool: sqlx::PgPool,
         cache: Arc<RedisCache>,
     ) -> Self {
+        // Initialize personalization service with default config
+        let personalization_service = Arc::new(PersonalizationService::new(
+            crate::config::PersonalizationConfig::default(),
+            cache.clone(),
+        ));
+
+        // Initialize analytics service
+        let analytics = Some(Arc::new(SearchAnalytics::new(db_pool.clone())));
+
         Self {
             config,
             intent_parser,
@@ -88,7 +114,46 @@ impl HybridSearchService {
             keyword_search,
             db_pool,
             cache,
+            facet_service: Arc::new(FacetService::new()),
+            personalization_service,
+            analytics,
         }
+    }
+
+    /// Create new hybrid search service with custom personalization config
+    pub fn new_with_personalization(
+        config: Arc<DiscoveryConfig>,
+        intent_parser: Arc<IntentParser>,
+        vector_search: Arc<vector::VectorSearch>,
+        keyword_search: Arc<keyword::KeywordSearch>,
+        db_pool: sqlx::PgPool,
+        cache: Arc<RedisCache>,
+        personalization_config: crate::config::PersonalizationConfig,
+    ) -> Self {
+        let personalization_service = Arc::new(PersonalizationService::new(
+            personalization_config,
+            cache.clone(),
+        ));
+
+        // Initialize analytics service
+        let analytics = Some(Arc::new(SearchAnalytics::new(db_pool.clone())));
+
+        Self {
+            config,
+            intent_parser,
+            vector_search,
+            keyword_search,
+            db_pool,
+            cache,
+            facet_service: Arc::new(FacetService::new()),
+            personalization_service,
+            analytics,
+        }
+    }
+
+    /// Get analytics service
+    pub fn analytics(&self) -> Option<Arc<SearchAnalytics>> {
+        self.analytics.clone()
     }
 
     /// Execute hybrid search with caching
@@ -114,6 +179,47 @@ impl HybridSearchService {
 
         // Execute full search pipeline
         let response = self.execute_search(&request).await?;
+
+        // Log search event for analytics (non-blocking)
+        let latency_ms = start_time.elapsed().as_millis() as i32;
+        if let Some(analytics) = &self.analytics {
+            let user_id = request.user_id.as_ref().map(|id| id.to_string());
+            let filters = request
+                .filters
+                .as_ref()
+                .map(|f| {
+                    let mut map = std::collections::HashMap::new();
+                    if !f.genres.is_empty() {
+                        map.insert("genres".to_string(), serde_json::json!(f.genres));
+                    }
+                    if !f.platforms.is_empty() {
+                        map.insert("platforms".to_string(), serde_json::json!(f.platforms));
+                    }
+                    if let Some((min, max)) = f.year_range {
+                        map.insert("year_range".to_string(), serde_json::json!([min, max]));
+                    }
+                    if let Some((min, max)) = f.rating_range {
+                        map.insert("rating_range".to_string(), serde_json::json!([min, max]));
+                    }
+                    map
+                })
+                .unwrap_or_default();
+
+            let analytics_clone = analytics.clone();
+            let query_clone = request.query.clone();
+            tokio::spawn(async move {
+                let _ = analytics_clone
+                    .query_log()
+                    .log_search(
+                        &query_clone,
+                        user_id.as_deref(),
+                        response.total_count as i32,
+                        latency_ms,
+                        filters,
+                    )
+                    .await;
+            });
+        }
 
         // Cache results with 30-minute TTL
         if let Err(e) = self.cache.set(&cache_key, &response, 1800).await {
@@ -148,14 +254,34 @@ impl HybridSearchService {
         );
 
         // Phase 4: Apply personalization if user_id provided
-        let ranked_results = if let Some(_user_id) = request.user_id {
-            // TODO: Apply user preference scoring
-            merged_results
+        let ranked_results = if let Some(user_id) = request.user_id {
+            match self
+                .personalization_service
+                .personalize_results(
+                    user_id,
+                    merged_results,
+                    request.experiment_variant.as_deref(),
+                )
+                .await
+            {
+                Ok(personalized) => personalized,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        user_id = %user_id,
+                        "Personalization failed, using original ranking"
+                    );
+                    merged_results
+                }
+            }
         } else {
             merged_results
         };
 
-        // Phase 5: Paginate
+        // Phase 5: Compute facets from all results (before pagination)
+        let facets = self.facet_service.compute_facets(&ranked_results);
+
+        // Phase 6: Paginate
         let total_count = ranked_results.len();
         let start = ((request.page - 1) * request.page_size) as usize;
         let end = std::cmp::min(start + request.page_size as usize, total_count);
@@ -166,6 +292,7 @@ impl HybridSearchService {
         info!(
             search_time_ms = %search_time_ms,
             total_results = %total_count,
+            facet_count = %facets.len(),
             "Completed full search execution"
         );
 
@@ -176,6 +303,7 @@ impl HybridSearchService {
             page_size: request.page_size,
             query_parsed: intent,
             search_time_ms,
+            facets,
         })
     }
 
@@ -381,17 +509,29 @@ mod tests {
             }
         };
 
+        let personalization_service = Arc::new(PersonalizationService::new(
+            crate::config::PersonalizationConfig::default(),
+            cache.clone(),
+        ));
+
         let service = HybridSearchService {
             config,
-            intent_parser: Arc::new(IntentParser::new(String::new(), String::new())),
+            intent_parser: Arc::new(IntentParser::new(
+                String::new(),
+                String::new(),
+                cache.clone(),
+            )),
             vector_search: Arc::new(vector::VectorSearch::new(
                 String::new(),
                 String::new(),
                 768,
             )),
             keyword_search: Arc::new(keyword::KeywordSearch::new(String::new())),
-            db_pool,
+            db_pool: db_pool.clone(),
             cache,
+            facet_service: Arc::new(FacetService::new()),
+            personalization_service,
+            analytics: Some(Arc::new(SearchAnalytics::new(db_pool))),
         };
 
         let merged = service.reciprocal_rank_fusion(vector_results, keyword_results, 60.0);
@@ -414,6 +554,7 @@ mod tests {
             page: 1,
             page_size: 20,
             user_id: Some(Uuid::nil()), // Use nil UUID for deterministic testing
+            experiment_variant: None,
         };
 
         let request2 = request1.clone();

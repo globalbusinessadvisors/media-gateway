@@ -1,6 +1,6 @@
 use crate::circuit_breaker::CircuitBreakerManager;
 use crate::config::Config;
-use crate::health::{self, HealthChecker};
+use crate::health::{self, HealthAggregator, HealthChecker};
 use crate::middleware::{LoggingMiddleware, RequestIdMiddleware};
 use crate::proxy::ServiceProxy;
 use crate::rate_limit::RateLimiter;
@@ -8,6 +8,7 @@ use crate::routes;
 use actix_cors::Cors;
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 pub struct Server {
@@ -55,6 +56,10 @@ impl Server {
         let health_checker = Arc::new(HealthChecker::new(proxy.clone(), circuit_breaker.clone()));
         info!("Health checker initialized");
 
+        // Initialize health aggregator
+        let health_aggregator = Arc::new(HealthAggregator::new(Duration::from_secs(5)));
+        info!("Health aggregator initialized");
+
         let bind_addr = format!("{}:{}", self.config.server.host, self.config.server.port);
         info!("Binding to {}", bind_addr);
 
@@ -80,6 +85,7 @@ impl Server {
                 .app_data(web::Data::new(rate_limiter.clone()))
                 .app_data(web::Data::new(circuit_breaker.clone()))
                 .app_data(web::Data::new(health_checker.clone()))
+                .app_data(web::Data::new(health_aggregator.clone()))
                 // Add middleware
                 .wrap(cors)
                 .wrap(LoggingMiddleware)
@@ -88,6 +94,7 @@ impl Server {
                 .route("/health", web::get().to(health::health))
                 .route("/health/ready", web::get().to(health::readiness))
                 .route("/health/live", web::get().to(health::liveness))
+                .route("/health/aggregate", web::get().to(health::aggregate))
                 // API routes
                 .configure(routes::configure)
         })

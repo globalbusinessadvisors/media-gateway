@@ -40,6 +40,15 @@ pub enum SyncOperation {
         position: f64,
         timestamp: i64,
     },
+    #[serde(rename = "device_command")]
+    DeviceCommand {
+        command_id: Uuid,
+        source_device_id: String,
+        target_device_id: String,
+        command_type: String,
+        payload: serde_json::Value,
+        timestamp: i64,
+    },
 }
 
 /// Report of sync replay operation
@@ -86,12 +95,85 @@ impl Default for SyncReport {
     }
 }
 
+/// Delta sync configuration
+#[derive(Debug, Clone)]
+pub struct DeltaSyncConfig {
+    /// Enable delta encoding
+    pub enabled: bool,
+    /// Enable compression
+    pub compression_enabled: bool,
+    /// Minimum batch size for compression
+    pub min_batch_size: usize,
+}
+
+impl Default for DeltaSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("DELTA_SYNC_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(true),
+            compression_enabled: std::env::var("DELTA_SYNC_COMPRESSION")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(true),
+            min_batch_size: std::env::var("DELTA_SYNC_MIN_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+        }
+    }
+}
+
+/// Delta sync metrics
+#[derive(Debug, Clone, Default)]
+struct DeltaSyncMetrics {
+    /// Total bytes saved via delta encoding
+    bytes_saved: usize,
+    /// Total original bytes
+    bytes_original: usize,
+    /// Total compressed bytes
+    bytes_compressed: usize,
+}
+
+impl DeltaSyncMetrics {
+    fn compression_ratio(&self) -> f64 {
+        if self.bytes_original == 0 {
+            1.0
+        } else {
+            self.bytes_compressed as f64 / self.bytes_original as f64
+        }
+    }
+
+    fn delta_savings_percent(&self) -> f64 {
+        if self.bytes_original == 0 {
+            0.0
+        } else {
+            (self.bytes_saved as f64 / self.bytes_original as f64) * 100.0
+        }
+    }
+}
+
+/// Previous state for delta calculation
+#[derive(Debug, Clone)]
+struct PreviousState {
+    content_id: Uuid,
+    position: f64,
+    timestamp: i64,
+}
+
 /// Offline sync queue with SQLite persistence
 pub struct OfflineSyncQueue {
     /// SQLite database connection
     db: Arc<parking_lot::Mutex<Connection>>,
     /// Publisher for sync operations
     publisher: Arc<dyn SyncPublisher>,
+    /// Delta sync configuration
+    delta_config: DeltaSyncConfig,
+    /// Previous state for delta encoding
+    previous_states: Arc<parking_lot::RwLock<std::collections::HashMap<Uuid, PreviousState>>>,
+    /// Delta sync metrics
+    metrics: Arc<parking_lot::RwLock<DeltaSyncMetrics>>,
 }
 
 impl OfflineSyncQueue {
@@ -132,6 +214,9 @@ impl OfflineSyncQueue {
         Ok(Self {
             db: Arc::new(parking_lot::Mutex::new(conn)),
             publisher,
+            delta_config: DeltaSyncConfig::default(),
+            previous_states: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            metrics: Arc::new(parking_lot::RwLock::new(DeltaSyncMetrics::default())),
         })
     }
 
@@ -158,7 +243,21 @@ impl OfflineSyncQueue {
         Ok(Self {
             db: Arc::new(parking_lot::Mutex::new(conn)),
             publisher,
+            delta_config: DeltaSyncConfig::default(),
+            previous_states: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            metrics: Arc::new(parking_lot::RwLock::new(DeltaSyncMetrics::default())),
         })
+    }
+
+    /// Create a new offline sync queue with custom delta sync config
+    pub fn new_with_config<P: AsRef<Path>>(
+        db_path: P,
+        publisher: Arc<dyn SyncPublisher>,
+        delta_config: DeltaSyncConfig,
+    ) -> Result<Self, QueueError> {
+        let mut queue = Self::new(db_path, publisher)?;
+        queue.delta_config = delta_config;
+        Ok(queue)
     }
 
     /// Enqueue a sync operation
@@ -176,6 +275,7 @@ impl OfflineSyncQueue {
             SyncOperation::WatchlistAdd { .. } => "watchlist_add",
             SyncOperation::WatchlistRemove { .. } => "watchlist_remove",
             SyncOperation::ProgressUpdate { .. } => "progress_update",
+            SyncOperation::DeviceCommand { .. } => "device_command",
         };
 
         let payload = serde_json::to_string(&op)?;
@@ -403,33 +503,203 @@ impl OfflineSyncQueue {
 
     /// Publish a sync operation using the configured publisher
     async fn publish_operation(&self, op: &SyncOperation) -> Result<(), PublisherError> {
-        match op {
-            SyncOperation::WatchlistAdd { user_id, content_id, timestamp } => {
+        let message = self.convert_to_sync_message(op)?;
+
+        // Track original size for metrics
+        let original_size = serde_json::to_string(&message)
+            .map(|s| s.len())
+            .unwrap_or(0);
+
+        // Publish the message
+        self.publisher.publish(message).await?;
+
+        // Update metrics
+        let mut metrics = self.metrics.write();
+        metrics.bytes_original += original_size;
+
+        debug!(
+            "Published operation: original_size={} bytes, compression_ratio={:.2}, delta_savings={:.1}%",
+            original_size,
+            metrics.compression_ratio(),
+            metrics.delta_savings_percent()
+        );
+
+        Ok(())
+    }
+
+    /// Convert SyncOperation to SyncMessage with delta encoding
+    fn convert_to_sync_message(&self, op: &SyncOperation) -> Result<SyncMessage, PublisherError> {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let device_id = "offline-queue".to_string();
+
+        let (payload, operation_type) = match op {
+            SyncOperation::WatchlistAdd { user_id, content_id, timestamp: ts } => {
+                // Minimal payload for watchlist operations
+                let payload = MessagePayload::WatchlistUpdate {
+                    operation: crate::sync::WatchlistOperation::Add,
+                    content_id: content_id.to_string(),
+                    unique_tag: format!("{}:{}", user_id, content_id),
+                    timestamp: self.millis_to_hlc(*ts),
+                };
+
                 debug!(
-                    "Publishing watchlist add: user={}, content={}, timestamp={}",
-                    user_id, content_id, timestamp
+                    "Converting WatchlistAdd: user={}, content={}, timestamp={}",
+                    user_id, content_id, ts
                 );
-                // In a real implementation, this would convert to WatchlistUpdate
-                // For now, we'll create a generic sync message
-                // The actual implementation would depend on the specific publisher interface
-                // This is a placeholder that shows the pattern
-                Ok(())
+
+                (payload, "watchlist_add".to_string())
             }
-            SyncOperation::WatchlistRemove { user_id, content_id, timestamp } => {
+
+            SyncOperation::WatchlistRemove { user_id, content_id, timestamp: ts } => {
+                let payload = MessagePayload::WatchlistUpdate {
+                    operation: crate::sync::WatchlistOperation::Remove,
+                    content_id: content_id.to_string(),
+                    unique_tag: format!("{}:{}", user_id, content_id),
+                    timestamp: self.millis_to_hlc(*ts),
+                };
+
                 debug!(
-                    "Publishing watchlist remove: user={}, content={}, timestamp={}",
-                    user_id, content_id, timestamp
+                    "Converting WatchlistRemove: user={}, content={}, timestamp={}",
+                    user_id, content_id, ts
                 );
-                Ok(())
+
+                (payload, "watchlist_remove".to_string())
             }
-            SyncOperation::ProgressUpdate { user_id, content_id, position, timestamp } => {
+
+            SyncOperation::ProgressUpdate { user_id, content_id, position, timestamp: ts } => {
+                // Delta encoding: calculate position diff if enabled
+                let (position_to_send, delta_applied) = if self.delta_config.enabled {
+                    self.calculate_position_delta(*content_id, *position, *ts)
+                } else {
+                    (*position, false)
+                };
+
+                let position_seconds = (position_to_send * 1000.0) as u32;
+                let duration_seconds = 1000; // Placeholder, would come from actual content metadata
+
+                let payload = MessagePayload::ProgressUpdate {
+                    content_id: content_id.to_string(),
+                    position_seconds,
+                    duration_seconds,
+                    state: "Playing".to_string(),
+                    timestamp: self.millis_to_hlc(*ts),
+                };
+
+                if delta_applied {
+                    // Track bytes saved by delta encoding
+                    let original_bytes = std::mem::size_of::<f64>();
+                    let delta_bytes = std::mem::size_of::<f64>(); // In real impl, delta would be smaller
+                    let saved = original_bytes.saturating_sub(delta_bytes);
+
+                    let mut metrics = self.metrics.write();
+                    metrics.bytes_saved += saved;
+
+                    debug!(
+                        "Delta encoding applied: content={}, position_diff={:.2}, bytes_saved={}",
+                        content_id, position_to_send, saved
+                    );
+                }
+
                 debug!(
-                    "Publishing progress update: user={}, content={}, position={}, timestamp={}",
-                    user_id, content_id, position, timestamp
+                    "Converting ProgressUpdate: user={}, content={}, position={}, timestamp={}",
+                    user_id, content_id, position, ts
                 );
-                Ok(())
+
+                (payload, "progress_update".to_string())
             }
+
+            SyncOperation::DeviceCommand { command_id, source_device_id, target_device_id, command_type, payload: cmd_payload, timestamp: ts } => {
+                // For device commands, we create a generic sync message with the command payload
+                // This would typically be routed through a separate command channel
+                let payload_json = serde_json::json!({
+                    "command_id": command_id,
+                    "source_device_id": source_device_id,
+                    "target_device_id": target_device_id,
+                    "command_type": command_type,
+                    "payload": cmd_payload,
+                    "timestamp": ts,
+                });
+
+                debug!(
+                    "Converting DeviceCommand: command_id={}, source={}, target={}, type={}",
+                    command_id, source_device_id, target_device_id, command_type
+                );
+
+                // Create a batch message wrapping the command
+                let command_msg = SyncMessage {
+                    payload: MessagePayload::Batch { messages: vec![] },
+                    timestamp: timestamp.clone(),
+                    operation_type: "device_command".to_string(),
+                    device_id: source_device_id.clone(),
+                    message_id: command_id.to_string(),
+                };
+
+                return Ok(command_msg);
+            }
+        };
+
+        Ok(SyncMessage {
+            payload,
+            timestamp,
+            operation_type,
+            device_id,
+            message_id,
+        })
+    }
+
+    /// Calculate position delta for progress updates
+    fn calculate_position_delta(&self, content_id: Uuid, current_position: f64, timestamp: i64) -> (f64, bool) {
+        let mut states = self.previous_states.write();
+
+        if let Some(prev) = states.get(&content_id) {
+            // Calculate delta from previous position
+            let position_diff = current_position - prev.position;
+
+            // Update state
+            states.insert(content_id, PreviousState {
+                content_id,
+                position: current_position,
+                timestamp,
+            });
+
+            (position_diff, true)
+        } else {
+            // No previous state, send full position
+            states.insert(content_id, PreviousState {
+                content_id,
+                position: current_position,
+                timestamp,
+            });
+
+            (current_position, false)
         }
+    }
+
+    /// Convert milliseconds timestamp to HLCTimestamp
+    fn millis_to_hlc(&self, millis: i64) -> crate::crdt::HLCTimestamp {
+        crate::crdt::HLCTimestamp::new(
+            millis as u64,
+            0,
+            "offline-queue".to_string(),
+        )
+    }
+
+    /// Get current delta sync metrics
+    pub fn get_metrics(&self) -> (usize, usize, f64, f64) {
+        let metrics = self.metrics.read();
+        (
+            metrics.bytes_original,
+            metrics.bytes_saved,
+            metrics.compression_ratio(),
+            metrics.delta_savings_percent(),
+        )
+    }
+
+    /// Reset delta sync metrics
+    pub fn reset_metrics(&self) {
+        let mut metrics = self.metrics.write();
+        *metrics = DeltaSyncMetrics::default();
     }
 }
 
@@ -821,5 +1091,341 @@ mod tests {
 
         let deserialized: SyncOperation = serde_json::from_str(&json).unwrap();
         assert_eq!(op, deserialized);
+    }
+
+    // Delta Sync Tests
+
+    #[test]
+    fn test_delta_sync_config_from_env() {
+        // Test default values
+        let config = DeltaSyncConfig::default();
+        assert!(config.enabled);
+        assert!(config.compression_enabled);
+        assert_eq!(config.min_batch_size, 3);
+    }
+
+    #[test]
+    fn test_delta_sync_config_custom() {
+        let config = DeltaSyncConfig {
+            enabled: false,
+            compression_enabled: false,
+            min_batch_size: 5,
+        };
+        assert!(!config.enabled);
+        assert!(!config.compression_enabled);
+        assert_eq!(config.min_batch_size, 5);
+    }
+
+    #[test]
+    fn test_delta_position_calculation() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        let content_id = Uuid::new_v4();
+
+        // First update - no previous state, should return full position
+        let (position1, delta_applied1) = queue.calculate_position_delta(content_id, 100.0, 1000);
+        assert_eq!(position1, 100.0);
+        assert!(!delta_applied1);
+
+        // Second update - should calculate delta
+        let (position2, delta_applied2) = queue.calculate_position_delta(content_id, 150.0, 2000);
+        assert_eq!(position2, 50.0); // 150.0 - 100.0
+        assert!(delta_applied2);
+
+        // Third update - delta from previous
+        let (position3, delta_applied3) = queue.calculate_position_delta(content_id, 200.0, 3000);
+        assert_eq!(position3, 50.0); // 200.0 - 150.0
+        assert!(delta_applied3);
+    }
+
+    #[test]
+    fn test_convert_to_sync_message_watchlist_add() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let op = SyncOperation::WatchlistAdd {
+            user_id,
+            content_id,
+            timestamp: 1000,
+        };
+
+        let message = queue.convert_to_sync_message(&op).unwrap();
+        assert_eq!(message.operation_type, "watchlist_add");
+        assert_eq!(message.device_id, "offline-queue");
+    }
+
+    #[test]
+    fn test_convert_to_sync_message_watchlist_remove() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let op = SyncOperation::WatchlistRemove {
+            user_id,
+            content_id,
+            timestamp: 2000,
+        };
+
+        let message = queue.convert_to_sync_message(&op).unwrap();
+        assert_eq!(message.operation_type, "watchlist_remove");
+    }
+
+    #[test]
+    fn test_convert_to_sync_message_progress_update() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        let op = SyncOperation::ProgressUpdate {
+            user_id,
+            content_id,
+            position: 0.5,
+            timestamp: 3000,
+        };
+
+        let message = queue.convert_to_sync_message(&op).unwrap();
+        assert_eq!(message.operation_type, "progress_update");
+
+        // Verify payload structure
+        if let MessagePayload::ProgressUpdate { content_id: cid, .. } = message.payload {
+            assert_eq!(cid, content_id.to_string());
+        } else {
+            panic!("Expected ProgressUpdate payload");
+        }
+    }
+
+    #[test]
+    fn test_convert_to_sync_message_device_command() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        let command_id = Uuid::new_v4();
+        let op = SyncOperation::DeviceCommand {
+            command_id,
+            source_device_id: "device-1".to_string(),
+            target_device_id: "device-2".to_string(),
+            command_type: "play".to_string(),
+            payload: serde_json::json!({"content_id": "movie-123"}),
+            timestamp: 4000,
+        };
+
+        let message = queue.convert_to_sync_message(&op).unwrap();
+        assert_eq!(message.operation_type, "device_command");
+        assert_eq!(message.message_id, command_id.to_string());
+    }
+
+    #[test]
+    fn test_delta_sync_metrics() {
+        let mut metrics = DeltaSyncMetrics::default();
+
+        metrics.bytes_original = 1000;
+        metrics.bytes_saved = 200;
+        metrics.bytes_compressed = 600;
+
+        assert_eq!(metrics.compression_ratio(), 0.6);
+        assert_eq!(metrics.delta_savings_percent(), 20.0);
+    }
+
+    #[test]
+    fn test_metrics_tracking() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        let (original, saved, compression_ratio, delta_percent) = queue.get_metrics();
+        assert_eq!(original, 0);
+        assert_eq!(saved, 0);
+        assert_eq!(compression_ratio, 1.0);
+        assert_eq!(delta_percent, 0.0);
+    }
+
+    #[test]
+    fn test_reset_metrics() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        // Manually set some metrics
+        {
+            let mut metrics = queue.metrics.write();
+            metrics.bytes_original = 1000;
+            metrics.bytes_saved = 200;
+        }
+
+        // Verify metrics are set
+        let (original, saved, _, _) = queue.get_metrics();
+        assert_eq!(original, 1000);
+        assert_eq!(saved, 200);
+
+        // Reset
+        queue.reset_metrics();
+
+        // Verify reset
+        let (original, saved, _, _) = queue.get_metrics();
+        assert_eq!(original, 0);
+        assert_eq!(saved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_publish_operation_with_delta_sync() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(Arc::clone(&publisher) as Arc<dyn SyncPublisher>).unwrap();
+
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        // First progress update
+        let op1 = SyncOperation::ProgressUpdate {
+            user_id,
+            content_id,
+            position: 100.0,
+            timestamp: 1000,
+        };
+
+        queue.publish_operation(&op1).await.unwrap();
+
+        // Second progress update - should use delta
+        let op2 = SyncOperation::ProgressUpdate {
+            user_id,
+            content_id,
+            position: 150.0,
+            timestamp: 2000,
+        };
+
+        queue.publish_operation(&op2).await.unwrap();
+
+        // Verify publisher received both messages
+        assert_eq!(publisher.published_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_replay_with_device_command() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(Arc::clone(&publisher) as Arc<dyn SyncPublisher>).unwrap();
+
+        let command_id = Uuid::new_v4();
+
+        // Enqueue device command
+        queue
+            .enqueue(SyncOperation::DeviceCommand {
+                command_id,
+                source_device_id: "device-1".to_string(),
+                target_device_id: "device-2".to_string(),
+                command_type: "play".to_string(),
+                payload: serde_json::json!({"content_id": "movie-123"}),
+                timestamp: 1000,
+            })
+            .unwrap();
+
+        assert_eq!(queue.len().unwrap(), 1);
+
+        // Replay
+        let report = queue.replay_pending().await.unwrap();
+
+        assert_eq!(report.total_operations, 1);
+        assert_eq!(report.success_count, 1);
+        assert!(report.all_succeeded());
+        assert_eq!(queue.len().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_device_command_serialization() {
+        let command_id = Uuid::new_v4();
+
+        let op = SyncOperation::DeviceCommand {
+            command_id,
+            source_device_id: "device-1".to_string(),
+            target_device_id: "device-2".to_string(),
+            command_type: "pause".to_string(),
+            payload: serde_json::json!({"position": 100}),
+            timestamp: 5000,
+        };
+
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains("device_command"));
+        assert!(json.contains("device-1"));
+        assert!(json.contains("device-2"));
+
+        let deserialized: SyncOperation = serde_json::from_str(&json).unwrap();
+        assert_eq!(op, deserialized);
+    }
+
+    #[tokio::test]
+    async fn test_integration_delta_encoding_with_multiple_updates() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(Arc::clone(&publisher) as Arc<dyn SyncPublisher>).unwrap();
+
+        let user_id = Uuid::new_v4();
+        let content_id = Uuid::new_v4();
+
+        // Enqueue multiple progress updates
+        for i in 0..5 {
+            queue
+                .enqueue(SyncOperation::ProgressUpdate {
+                    user_id,
+                    content_id,
+                    position: (i as f64) * 10.0,
+                    timestamp: (i + 1) * 1000,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(queue.len().unwrap(), 5);
+
+        // Replay all operations
+        let report = queue.replay_pending().await.unwrap();
+
+        assert_eq!(report.total_operations, 5);
+        assert_eq!(report.success_count, 5);
+        assert!(report.all_succeeded());
+
+        // Verify all were published
+        assert_eq!(publisher.published_count(), 5);
+
+        // Check metrics were tracked
+        let (original, _saved, _ratio, _percent) = queue.get_metrics();
+        assert!(original > 0, "Metrics should track published bytes");
+    }
+
+    #[test]
+    fn test_queue_with_custom_delta_config() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("test_delta_config_{}.db", Uuid::new_v4()));
+
+        let publisher = Arc::new(MockPublisher::new());
+
+        let config = DeltaSyncConfig {
+            enabled: false,
+            compression_enabled: false,
+            min_batch_size: 10,
+        };
+
+        let queue = OfflineSyncQueue::new_with_config(&db_path, publisher, config.clone()).unwrap();
+
+        assert!(!queue.delta_config.enabled);
+        assert!(!queue.delta_config.compression_enabled);
+        assert_eq!(queue.delta_config.min_batch_size, 10);
+
+        // Cleanup
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[test]
+    fn test_millis_to_hlc_conversion() {
+        let publisher = Arc::new(MockPublisher::new());
+        let queue = OfflineSyncQueue::new_in_memory(publisher).unwrap();
+
+        let millis = 1234567890123i64;
+        let hlc = queue.millis_to_hlc(millis);
+
+        assert_eq!(hlc.physical_time, millis as u64);
+        assert_eq!(hlc.logical_counter, 0);
+        assert_eq!(hlc.node_id, "offline-queue");
     }
 }

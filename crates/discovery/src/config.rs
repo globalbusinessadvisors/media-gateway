@@ -24,6 +24,41 @@ pub struct DiscoveryConfig {
 
     /// Embedding API configuration
     pub embedding: EmbeddingConfig,
+
+    /// Personalization configuration
+    #[serde(default)]
+    pub personalization: PersonalizationConfig,
+}
+
+/// Personalization configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PersonalizationConfig {
+    /// SONA service URL
+    pub sona_url: String,
+
+    /// Personalization weight in final score (0.0-1.0)
+    pub boost_weight: f32,
+
+    /// Request timeout in milliseconds
+    pub timeout_ms: u64,
+
+    /// Cache TTL for user preferences (seconds)
+    pub cache_ttl_sec: u64,
+
+    /// Enable/disable personalization
+    pub enabled: bool,
+}
+
+impl Default for PersonalizationConfig {
+    fn default() -> Self {
+        Self {
+            sona_url: "http://localhost:8082".to_string(),
+            boost_weight: 0.25,
+            timeout_ms: 50,
+            cache_ttl_sec: 300,
+            enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -208,6 +243,7 @@ impl Default for DiscoveryConfig {
                 api_key: String::new(),
                 timeout_ms: 5000,
             },
+            personalization: PersonalizationConfig::default(),
         }
     }
 }

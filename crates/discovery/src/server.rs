@@ -5,7 +5,7 @@ use uuid::Uuid;
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 
 use crate::config::DiscoveryConfig;
-use crate::search::{HybridSearchService, SearchFilters, SearchRequest};
+use crate::search::{AutocompleteService, HybridSearchService, SearchFilters, SearchRequest};
 
 /// JWT claims structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,6 +19,7 @@ struct Claims {
 pub struct AppState {
     pub config: Arc<DiscoveryConfig>,
     pub search_service: Arc<HybridSearchService>,
+    pub autocomplete_service: Arc<AutocompleteService>,
     pub jwt_secret: String,
 }
 
@@ -243,6 +244,32 @@ async fn get_content(
     }
 }
 
+/// Autocomplete request query parameters
+#[derive(Debug, Deserialize)]
+pub struct AutocompleteQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/discovery/suggest - Autocomplete suggestions endpoint
+async fn autocomplete_suggest(
+    data: web::Data<AppState>,
+    query: web::Query<AutocompleteQuery>,
+) -> impl Responder {
+    let limit = query.limit.unwrap_or(10);
+
+    match data.autocomplete_service.suggest(&query.q, limit).await {
+        Ok(suggestions) => HttpResponse::Ok().json(suggestions),
+        Err(e) => {
+            tracing::error!("Autocomplete error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Autocomplete failed",
+                "message": e.to_string()
+            }))
+        }
+    }
+}
+
 /// Configure application routes
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -251,7 +278,11 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route("/search", web::post().to(hybrid_search))
             .route("/search/semantic", web::post().to(semantic_search))
             .route("/search/keyword", web::post().to(keyword_search))
-            .route("/content/{id}", web::get().to(get_content)),
+            .route("/content/{id}", web::get().to(get_content))
+            .service(
+                web::scope("/discovery")
+                    .route("/suggest", web::get().to(autocomplete_suggest))
+            ),
     );
 }
 
@@ -259,6 +290,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 pub async fn start_server(
     config: Arc<DiscoveryConfig>,
     search_service: Arc<HybridSearchService>,
+    autocomplete_service: Arc<AutocompleteService>,
 ) -> anyhow::Result<()> {
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
 
@@ -274,6 +306,7 @@ pub async fn start_server(
     let app_state = web::Data::new(AppState {
         config: config.clone(),
         search_service,
+        autocomplete_service,
         jwt_secret,
     });
 

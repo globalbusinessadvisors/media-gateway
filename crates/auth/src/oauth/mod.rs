@@ -1,5 +1,7 @@
 pub mod device;
 pub mod pkce;
+pub mod providers;
+pub mod handlers;
 
 use crate::error::{AuthError, Result};
 use serde::{Deserialize, Serialize};

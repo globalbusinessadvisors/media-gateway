@@ -6,6 +6,10 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+name = "media_gateway_playback"
+path = "src/lib.rs"
+
 [[bin]]
 name = "playback-service"
 path = "src/main.rs"

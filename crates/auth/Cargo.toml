@@ -38,3 +38,13 @@ chrono = { workspace = true }
 base64 = "0.21"
 sha2 = "0.10"
 futures-util = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+urlencoding = "2.1"
+totp-rs = { version = "5.4", features = ["otpauth", "qr"] }
+qrcode = "0.14"
+aes-gcm = "0.10"
+
+[dev-dependencies]
+wiremock = "0.6"
+mockall = "0.12"
+mockito = "1.2"
