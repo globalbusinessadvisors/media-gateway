@@ -14,6 +14,7 @@ alerting:
 # Alert rule files
 rule_files:
   - /etc/prometheus/alerts.yml
+  - /etc/prometheus/recording_rules.yml
 
 scrape_configs:
   - job_name: 'prometheus'

@@ -5,6 +5,13 @@ use thiserror::Error;
 use tracing::{span, Level, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::{global, KeyValue};
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::trace::{BatchConfig, RandomIdGenerator, Sampler};
+use opentelemetry_sdk::{runtime, Resource};
+use opentelemetry_semantic_conventions as semconv;
+
 /// Telemetry configuration errors
 #[derive(Debug, Error)]
 pub enum TelemetryError {
@@ -108,34 +115,118 @@ impl TracingConfig {
 pub async fn init_tracing(config: TracingConfig) -> Result<(), TelemetryError> {
     config.validate()?;
 
-    // For testing/development without actual OTLP infrastructure
-    // We'll set up basic tracing subscriber with optional console output
+    // Set up environment filter
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // Create resource with service metadata
+    let resource = Resource::new(vec![
+        KeyValue::new(semconv::resource::SERVICE_NAME, config.service_name.clone()),
+        KeyValue::new(semconv::resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+        KeyValue::new("deployment.environment", std::env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string())),
+    ]);
+
+    // Check if OTEL_EXPORTER_OTLP_ENDPOINT is set
+    let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| config.otlp_endpoint.clone());
+
+    // Only initialize OTLP exporter if endpoint is explicitly set
+    let has_otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok()
+        || !config.otlp_endpoint.is_empty();
 
     let subscriber = tracing_subscriber::registry().with(env_filter);
 
-    if config.enable_console {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_target(true)
-            .with_thread_ids(true)
-            .with_line_number(true);
+    if has_otlp_endpoint {
+        // Configure sampling based on environment
+        let sampler = if config.sampling_rate >= 1.0 {
+            Sampler::AlwaysOn
+        } else if config.sampling_rate <= 0.0 {
+            Sampler::AlwaysOff
+        } else {
+            Sampler::TraceIdRatioBased(config.sampling_rate)
+        };
 
-        subscriber
-            .with(fmt_layer)
-            .try_init()
-            .map_err(|e| TelemetryError::SubscriberInit(e.to_string()))?;
+        // Configure batch span processor for optimal performance
+        let batch_config = BatchConfig::default()
+            .with_max_queue_size(2048)
+            .with_max_export_batch_size(512)
+            .with_scheduled_delay(Duration::from_millis(5000));
+
+        // Create OTLP exporter using tonic gRPC
+        let exporter = opentelemetry_otlp::new_exporter()
+            .tonic()
+            .with_endpoint(&otlp_endpoint)
+            .with_timeout(Duration::from_secs(10));
+
+        // Build tracer provider
+        let tracer_provider = opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(exporter)
+            .with_trace_config(
+                opentelemetry_sdk::trace::config()
+                    .with_sampler(sampler)
+                    .with_id_generator(RandomIdGenerator::default())
+                    .with_resource(resource)
+                    .with_max_events_per_span(64)
+                    .with_max_attributes_per_span(32)
+            )
+            .with_batch_config(batch_config)
+            .install_batch(runtime::Tokio)
+            .map_err(|e| TelemetryError::OtlpInitialization(e.to_string()))?;
+
+        // Get tracer from provider
+        let tracer = tracer_provider.tracer("media-gateway");
+
+        // Create OpenTelemetry layer
+        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+        // Build subscriber with both OpenTelemetry and optional console output
+        if config.enable_console {
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_line_number(true);
+
+            subscriber
+                .with(telemetry)
+                .with(fmt_layer)
+                .try_init()
+                .map_err(|e| TelemetryError::SubscriberInit(e.to_string()))?;
+        } else {
+            subscriber
+                .with(telemetry)
+                .try_init()
+                .map_err(|e| TelemetryError::SubscriberInit(e.to_string()))?;
+        }
+
+        tracing::info!(
+            service_name = %config.service_name,
+            otlp_endpoint = %otlp_endpoint,
+            sampling_rate = %config.sampling_rate,
+            "Distributed tracing initialized with OTLP exporter"
+        );
     } else {
-        subscriber
-            .try_init()
-            .map_err(|e| TelemetryError::SubscriberInit(e.to_string()))?;
-    }
+        // Fallback to basic tracing without OTLP
+        if config.enable_console {
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_line_number(true);
 
-    tracing::info!(
-        service_name = %config.service_name,
-        otlp_endpoint = %config.otlp_endpoint,
-        sampling_rate = %config.sampling_rate,
-        "Distributed tracing initialized"
-    );
+            subscriber
+                .with(fmt_layer)
+                .try_init()
+                .map_err(|e| TelemetryError::SubscriberInit(e.to_string()))?;
+        } else {
+            subscriber
+                .try_init()
+                .map_err(|e| TelemetryError::SubscriberInit(e.to_string()))?;
+        }
+
+        tracing::info!(
+            service_name = %config.service_name,
+            "Basic tracing initialized (no OTLP endpoint configured)"
+        );
+    }
 
     Ok(())
 }
@@ -146,7 +237,10 @@ pub async fn init_tracing(config: TracingConfig) -> Result<(), TelemetryError> {
 pub async fn shutdown_tracing() -> Result<(), TelemetryError> {
     tracing::info!("Shutting down distributed tracing");
 
-    // Give time for pending spans to flush
+    // Shutdown OpenTelemetry and flush remaining spans
+    global::shutdown_tracer_provider();
+
+    // Give additional time for final flush
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     Ok(())

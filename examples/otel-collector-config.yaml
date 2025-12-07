@@ -1,0 +1,69 @@
+# OpenTelemetry Collector Configuration
+# This configuration receives OTLP traces and exports to Jaeger
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4318
+      http:
+        endpoint: 0.0.0.0:4319
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Add resource attributes
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:DEPLOYMENT_ENV}
+        action: upsert
+      - key: cluster.name
+        value: media-gateway-cluster
+        action: insert
+
+  # Filter out health check traces (optional)
+  filter/healthcheck:
+    traces:
+      span:
+        - 'attributes["http.target"] == "/health"'
+
+  # Tail sampling for production (optional)
+  probabilistic_sampler:
+    sampling_percentage: 10.0
+
+exporters:
+  # Export to Jaeger
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Export to console for debugging
+  logging:
+    loglevel: debug
+
+  # Export metrics to Prometheus (optional)
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlp/jaeger, logging]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [prometheus, logging]
+
+  telemetry:
+    logs:
+      level: debug
+    metrics:
+      address: 0.0.0.0:8888

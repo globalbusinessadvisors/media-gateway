@@ -17,6 +17,11 @@ validator = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 url = { workspace = true }
 sqlx = { workspace = true }
 redis = { workspace = true }
@@ -31,6 +36,7 @@ prometheus = { workspace = true }
 actix-web = { workspace = true }
 base64 = "0.22"
 rdkafka = { workspace = true }
+ammonia = "3.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

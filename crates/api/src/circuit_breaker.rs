@@ -148,7 +148,7 @@ impl CircuitBreaker {
                 Ok(json) => {
                     let mut conn = redis_manager.write().await;
                     // Set with 1 hour TTL to auto-cleanup stale circuits
-                    let result: Result<(), redis::RedisError> = conn.set_ex(&key, json, 3600).await;
+                    let result: Result<(), redis::RedisError> = conn.set_ex::<_, _, ()>(&key, json, 3600).await;
 
                     if let Err(e) = result {
                         error!(

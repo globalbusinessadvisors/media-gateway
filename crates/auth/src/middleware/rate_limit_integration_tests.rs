@@ -29,7 +29,7 @@ async fn cleanup_redis(redis_client: &redis::Client, pattern: &str) {
             .unwrap_or_default();
 
         for key in keys {
-            let _: Result<(), redis::RedisError> = conn.del(&key).await;
+            let _: Result<(), redis::RedisError> = conn.del::<_, ()>(&key).await;
         }
     }
 }

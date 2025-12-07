@@ -1,0 +1,91 @@
+groups:
+  - name: sli_availability
+    interval: 30s
+    rules:
+      # Availability SLI: Ratio of successful requests
+      - record: sli:availability:ratio_rate5m
+        expr: |
+          sum(rate(http_requests_total{status!~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total[5m]))
+
+      # Availability by service
+      - record: sli:availability:by_service:ratio_rate5m
+        expr: |
+          sum by (service) (rate(http_requests_total{status!~"5.."}[5m]))
+          /
+          sum by (service) (rate(http_requests_total[5m]))
+
+  - name: sli_latency
+    interval: 30s
+    rules:
+      # API Gateway latency p50
+      - record: sli:api_latency:p50_5m
+        expr: |
+          histogram_quantile(0.50,
+            sum(rate(http_request_duration_seconds_bucket{job="api-gateway"}[5m])) by (le)
+          )
+
+      # API Gateway latency p95
+      - record: sli:api_latency:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="api-gateway"}[5m])) by (le)
+          )
+
+      # API Gateway latency p99
+      - record: sli:api_latency:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{job="api-gateway"}[5m])) by (le)
+          )
+
+      # Latency by service p95
+      - record: sli:latency:by_service:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+          )
+
+  - name: slo_error_budget
+    interval: 1m
+    rules:
+      # 99.9% availability SLO (43.2 minutes/month error budget)
+      - record: slo:availability:target
+        expr: 0.999
+
+      # Error budget remaining (1.0 = 100% remaining, 0 = exhausted)
+      - record: slo:error_budget:remaining
+        expr: |
+          1 - (
+            (1 - sli:availability:ratio_rate5m)
+            /
+            (1 - 0.999)
+          )
+
+      # Error budget consumption rate (per hour)
+      - record: slo:error_budget:burn_rate_1h
+        expr: |
+          (1 - avg_over_time(sli:availability:ratio_rate5m[1h]))
+          /
+          (1 - 0.999)
+
+      # 30-day rolling SLO compliance
+      - record: slo:availability:compliance_30d
+        expr: |
+          avg_over_time(sli:availability:ratio_rate5m[30d]) >= 0.999
+
+  - name: sli_throughput
+    interval: 30s
+    rules:
+      # Request rate by service
+      - record: sli:throughput:requests_per_second
+        expr: sum(rate(http_requests_total[5m]))
+
+      # Request rate by service
+      - record: sli:throughput:by_service:requests_per_second
+        expr: sum by (service) (rate(http_requests_total[5m]))
+
+      # Error rate
+      - record: sli:error:rate_5m
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m]))

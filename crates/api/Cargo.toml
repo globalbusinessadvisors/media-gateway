@@ -40,3 +40,5 @@ hex = "0.4"
 bytes = { workspace = true }
 serde_urlencoded = "0.7"
 sqlx = { workspace = true }
+utoipa = { version = "4", features = ["actix_extras"] }
+utoipa-swagger-ui = { version = "6", features = ["actix-web"] }

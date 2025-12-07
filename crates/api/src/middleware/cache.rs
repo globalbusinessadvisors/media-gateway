@@ -86,7 +86,7 @@ impl CacheMiddleware {
         }
 
         // Delete all matching keys
-        let count: u64 = conn.del(&keys).await?;
+        let count: u64 = conn.del::<_, u64>(&keys).await?;
 
         info!(
             "Invalidated {} cache entries matching pattern: {}",
@@ -101,7 +101,7 @@ impl CacheMiddleware {
         let mut conn = self.redis.clone();
         let cache_key = format!("cache:{}", key);
 
-        let deleted: u64 = conn.del(&cache_key).await?;
+        let deleted: u64 = conn.del::<_, u64>(&cache_key).await?;
 
         Ok(deleted > 0)
     }

@@ -34,9 +34,9 @@ Fix test compilation failures in the auth crate that prevent the test suite from
 - `/workspaces/media-gateway/crates/auth/src/middleware/auth.rs:195` - Add `token_family_id: None` to test Claims
 
 ### Acceptance Criteria
-- [ ] `cargo test -p media-gateway-auth --lib` compiles without errors
-- [ ] All existing auth tests pass (minimum 95% pass rate)
-- [ ] No new warnings introduced
+- [x] `cargo test -p media-gateway-auth --lib` compiles without errors
+- [x] All existing auth tests pass (minimum 95% pass rate)
+- [x] No new warnings introduced
 
 ---
 
@@ -55,9 +55,9 @@ Fix test compilation failures in the sync crate related to Actix actor trait con
 - `/workspaces/media-gateway/crates/sync/src/ws/registry.rs` - Fix Handler trait implementation
 
 ### Acceptance Criteria
-- [ ] `cargo test -p media-gateway-sync --lib` compiles without errors
-- [ ] WebSocket broadcaster tests execute successfully
-- [ ] No regression in existing sync functionality
+- [x] `cargo test -p media-gateway-sync --lib` compiles without errors
+- [x] WebSocket broadcaster tests execute successfully
+- [x] No regression in existing sync functionality
 
 ---
 
@@ -75,9 +75,9 @@ Fix playback crate test compilation errors including missing SQLx query cache fo
 - `/workspaces/media-gateway/crates/playback/src/continue_watching.rs:59` - Move `MockContentMetadataProvider` to test module
 
 ### Acceptance Criteria
-- [ ] `cargo test -p media-gateway-playback --lib` compiles without errors
-- [ ] Integration tests can run with `SQLX_OFFLINE=true`
-- [ ] Mock provider moved out of production code
+- [x] `cargo test -p media-gateway-playback --lib` compiles without errors
+- [x] Integration tests can run with `SQLX_OFFLINE=true`
+- [x] Mock provider moved out of production code
 
 ---
 
@@ -106,9 +106,9 @@ conn.set_ex::<_, _, ()>(&key, value, TTL)?;
 ```
 
 ### Acceptance Criteria
-- [ ] Zero "never type fallback" warnings across workspace
-- [ ] All Redis operations have explicit type annotations
-- [ ] `cargo check --workspace` shows no future incompatibility warnings for never type
+- [x] Zero "never type fallback" warnings across workspace
+- [x] All Redis operations have explicit type annotations
+- [x] `cargo check --workspace` shows no future incompatibility warnings for never type
 
 ---
 
@@ -138,9 +138,9 @@ client.search_points(SearchPoints { ... }).await?;
 ```
 
 ### Acceptance Criteria
-- [ ] Zero deprecation warnings for qdrant-client
-- [ ] All vector search operations functional
-- [ ] Integration tests pass with Qdrant 1.16+
+- [x] Zero deprecation warnings for qdrant-client
+- [x] All vector search operations functional
+- [x] Integration tests pass with Qdrant 1.16+
 
 ---
 
@@ -171,10 +171,10 @@ Create a comprehensive end-to-end integration test framework using testcontainer
 - Playback: Progress tracking, continue watching, deep links
 
 ### Acceptance Criteria
-- [ ] E2E test framework compiles and runs
-- [ ] Minimum 20 integration tests implemented
-- [ ] Tests use real databases via testcontainers
-- [ ] All tests pass in CI environment
+- [x] E2E test framework compiles and runs
+- [x] Minimum 20 integration tests implemented
+- [x] Tests use real databases via testcontainers
+- [x] All tests pass in CI environment
 
 ---
 
@@ -202,10 +202,10 @@ Implement the missing performance testing framework using k6. Create load test s
 - Auth endpoints: <50ms p95 latency
 
 ### Acceptance Criteria
-- [ ] k6 scripts execute successfully
-- [ ] Baseline test completes without errors
-- [ ] Results exported to InfluxDB/Grafana format
-- [ ] CI integration for performance regression detection
+- [x] k6 scripts execute successfully
+- [x] Baseline test completes without errors
+- [x] Results exported to InfluxDB/Grafana format
+- [x] CI integration for performance regression detection
 
 ---
 
@@ -233,10 +233,10 @@ Replace the MockEventProducer in the ingestion crate with a production rdkafka i
 - Export Prometheus metrics for delivery success/failure
 
 ### Acceptance Criteria
-- [ ] Real Kafka producer replaces mock implementation
-- [ ] Events delivered to Kafka cluster successfully
-- [ ] Metrics exported for monitoring
-- [ ] Integration test validates end-to-end event flow
+- [x] Real Kafka producer replaces mock implementation
+- [x] Events delivered to Kafka cluster successfully
+- [x] Metrics exported for monitoring
+- [x] Integration test validates end-to-end event flow
 
 ---
 
@@ -264,10 +264,10 @@ Create Alertmanager configuration to route alerts defined in Prometheus. Configu
 - P3 Low: Email digest
 
 ### Acceptance Criteria
-- [ ] Alertmanager starts and connects to Prometheus
-- [ ] Test alert fires and routes correctly
-- [ ] Notification templates render properly
-- [ ] Silence and inhibition rules configured
+- [x] Alertmanager starts and connects to Prometheus
+- [x] Test alert fires and routes correctly
+- [x] Notification templates render properly
+- [x] Silence and inhibition rules configured
 
 ---
 
@@ -297,10 +297,10 @@ Consolidate fragmented migration directories into a single source of truth. Esta
 - `/workspaces/media-gateway/.github/workflows/ci-cd.yaml` - Update migration paths
 
 ### Acceptance Criteria
-- [ ] Single migrations directory with all migrations
-- [ ] Sequential numbering without gaps
-- [ ] Down migrations exist for all schema changes
-- [ ] Migration tests pass in CI
+- [x] Single migrations directory with all migrations
+- [x] Sequential numbering without gaps (001-016)
+- [x] Down migrations exist for all schema changes
+- [x] Migration tests pass in CI
 
 ---
 
@@ -333,10 +333,10 @@ let secret = std::env::var("JWT_SECRET")
 - Document required environment variables
 
 ### Acceptance Criteria
-- [ ] Service fails to start without JWT_SECRET in production
-- [ ] Clear error message indicates missing configuration
-- [ ] Development mode allows override with explicit flag
-- [ ] Documentation updated with security requirements
+- [x] Service fails to start without JWT_SECRET in production
+- [x] Clear error message indicates missing configuration
+- [x] Development mode allows override with explicit flag
+- [x] Documentation updated with security requirements
 
 ---
 
@@ -367,9 +367,9 @@ cargo clippy --workspace -- -D warnings
 ```
 
 ### Acceptance Criteria
-- [ ] `cargo clippy --workspace` produces zero warnings
-- [ ] Dead code files removed
-- [ ] All remaining `#[allow]` attributes documented with justification
+- [x] `cargo clippy --workspace` produces zero warnings
+- [x] Dead code files removed (user_old.rs deleted)
+- [x] All remaining `#[allow]` attributes documented with justification
 
 ---
 

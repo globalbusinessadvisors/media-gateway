@@ -1,4 +1,6 @@
+use crate::middleware::auth::{get_user_context, AuthMiddleware};
 use crate::proxy::{ProxyRequest, ServiceProxy};
+use crate::rate_limit::RateLimiter;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use std::sync::Arc;
 
@@ -20,6 +22,7 @@ fn convert_headers(
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/playback")
+            .wrap(AuthMiddleware::optional())
             .route("/sessions", web::post().to(create_session))
             .route("/sessions/{id}", web::get().to(get_session))
             .route("/sessions/{id}", web::delete().to(delete_session))
@@ -35,21 +38,49 @@ async fn create_session(
     req: HttpRequest,
     body: web::Bytes,
     proxy: web::Data<Arc<ServiceProxy>>,
+    rate_limiter: web::Data<Arc<RateLimiter>>,
 ) -> impl Responder {
-    let proxy_req = ProxyRequest {
-        service: "playback".to_string(),
-        path: "/api/v1/sessions".to_string(),
-        method: req.method().clone(),
-        headers: convert_headers(req.headers()),
-        body: Some(body),
-        query: req.uri().query().map(String::from),
-    };
+    let user_ctx = get_user_context(&req);
+    let user_id = user_ctx
+        .as_ref()
+        .map(|u| u.user_id.as_str())
+        .unwrap_or("anonymous");
+    let tier = user_ctx
+        .as_ref()
+        .map(|u| u.tier.as_str())
+        .unwrap_or("anonymous");
 
-    match proxy.forward(proxy_req).await {
-        Ok(response) => HttpResponse::build(response.status).body(response.body),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": e.to_string()
-        })),
+    match rate_limiter.check_rate_limit(user_id, tier).await {
+        Ok(rate_info) => {
+            let proxy_req = ProxyRequest {
+                service: "playback".to_string(),
+                path: "/api/v1/sessions".to_string(),
+                method: req.method().clone(),
+                headers: convert_headers(req.headers()),
+                body: Some(body),
+                query: req.uri().query().map(String::from),
+            };
+
+            match proxy.forward(proxy_req).await {
+                Ok(response) => {
+                    let mut http_response = HttpResponse::build(response.status);
+                    http_response.insert_header(("X-RateLimit-Limit", rate_info.limit.to_string()));
+                    http_response
+                        .insert_header(("X-RateLimit-Remaining", rate_info.remaining.to_string()));
+                    http_response.insert_header(("X-RateLimit-Reset", rate_info.reset.to_string()));
+
+                    for (key, value) in response.headers.iter() {
+                        http_response.insert_header((key.clone(), value.clone()));
+                    }
+
+                    http_response.body(response.body)
+                }
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            }
+        }
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -57,22 +88,50 @@ async fn get_session(
     req: HttpRequest,
     path: web::Path<String>,
     proxy: web::Data<Arc<ServiceProxy>>,
+    rate_limiter: web::Data<Arc<RateLimiter>>,
 ) -> impl Responder {
     let session_id = path.into_inner();
-    let proxy_req = ProxyRequest {
-        service: "playback".to_string(),
-        path: format!("/api/v1/sessions/{}", session_id),
-        method: req.method().clone(),
-        headers: convert_headers(req.headers()),
-        body: None,
-        query: req.uri().query().map(String::from),
-    };
+    let user_ctx = get_user_context(&req);
+    let user_id = user_ctx
+        .as_ref()
+        .map(|u| u.user_id.as_str())
+        .unwrap_or("anonymous");
+    let tier = user_ctx
+        .as_ref()
+        .map(|u| u.tier.as_str())
+        .unwrap_or("anonymous");
 
-    match proxy.forward(proxy_req).await {
-        Ok(response) => HttpResponse::build(response.status).body(response.body),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": e.to_string()
-        })),
+    match rate_limiter.check_rate_limit(user_id, tier).await {
+        Ok(rate_info) => {
+            let proxy_req = ProxyRequest {
+                service: "playback".to_string(),
+                path: format!("/api/v1/sessions/{}", session_id),
+                method: req.method().clone(),
+                headers: convert_headers(req.headers()),
+                body: None,
+                query: req.uri().query().map(String::from),
+            };
+
+            match proxy.forward(proxy_req).await {
+                Ok(response) => {
+                    let mut http_response = HttpResponse::build(response.status);
+                    http_response.insert_header(("X-RateLimit-Limit", rate_info.limit.to_string()));
+                    http_response
+                        .insert_header(("X-RateLimit-Remaining", rate_info.remaining.to_string()));
+                    http_response.insert_header(("X-RateLimit-Reset", rate_info.reset.to_string()));
+
+                    for (key, value) in response.headers.iter() {
+                        http_response.insert_header((key.clone(), value.clone()));
+                    }
+
+                    http_response.body(response.body)
+                }
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            }
+        }
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -80,22 +139,50 @@ async fn delete_session(
     req: HttpRequest,
     path: web::Path<String>,
     proxy: web::Data<Arc<ServiceProxy>>,
+    rate_limiter: web::Data<Arc<RateLimiter>>,
 ) -> impl Responder {
     let session_id = path.into_inner();
-    let proxy_req = ProxyRequest {
-        service: "playback".to_string(),
-        path: format!("/api/v1/sessions/{}", session_id),
-        method: req.method().clone(),
-        headers: convert_headers(req.headers()),
-        body: None,
-        query: req.uri().query().map(String::from),
-    };
+    let user_ctx = get_user_context(&req);
+    let user_id = user_ctx
+        .as_ref()
+        .map(|u| u.user_id.as_str())
+        .unwrap_or("anonymous");
+    let tier = user_ctx
+        .as_ref()
+        .map(|u| u.tier.as_str())
+        .unwrap_or("anonymous");
 
-    match proxy.forward(proxy_req).await {
-        Ok(response) => HttpResponse::build(response.status).body(response.body),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": e.to_string()
-        })),
+    match rate_limiter.check_rate_limit(user_id, tier).await {
+        Ok(rate_info) => {
+            let proxy_req = ProxyRequest {
+                service: "playback".to_string(),
+                path: format!("/api/v1/sessions/{}", session_id),
+                method: req.method().clone(),
+                headers: convert_headers(req.headers()),
+                body: None,
+                query: req.uri().query().map(String::from),
+            };
+
+            match proxy.forward(proxy_req).await {
+                Ok(response) => {
+                    let mut http_response = HttpResponse::build(response.status);
+                    http_response.insert_header(("X-RateLimit-Limit", rate_info.limit.to_string()));
+                    http_response
+                        .insert_header(("X-RateLimit-Remaining", rate_info.remaining.to_string()));
+                    http_response.insert_header(("X-RateLimit-Reset", rate_info.reset.to_string()));
+
+                    for (key, value) in response.headers.iter() {
+                        http_response.insert_header((key.clone(), value.clone()));
+                    }
+
+                    http_response.body(response.body)
+                }
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            }
+        }
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -104,22 +191,50 @@ async fn update_position(
     path: web::Path<String>,
     body: web::Bytes,
     proxy: web::Data<Arc<ServiceProxy>>,
+    rate_limiter: web::Data<Arc<RateLimiter>>,
 ) -> impl Responder {
     let session_id = path.into_inner();
-    let proxy_req = ProxyRequest {
-        service: "playback".to_string(),
-        path: format!("/api/v1/sessions/{}/position", session_id),
-        method: req.method().clone(),
-        headers: convert_headers(req.headers()),
-        body: Some(body),
-        query: req.uri().query().map(String::from),
-    };
+    let user_ctx = get_user_context(&req);
+    let user_id = user_ctx
+        .as_ref()
+        .map(|u| u.user_id.as_str())
+        .unwrap_or("anonymous");
+    let tier = user_ctx
+        .as_ref()
+        .map(|u| u.tier.as_str())
+        .unwrap_or("anonymous");
 
-    match proxy.forward(proxy_req).await {
-        Ok(response) => HttpResponse::build(response.status).body(response.body),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": e.to_string()
-        })),
+    match rate_limiter.check_rate_limit(user_id, tier).await {
+        Ok(rate_info) => {
+            let proxy_req = ProxyRequest {
+                service: "playback".to_string(),
+                path: format!("/api/v1/sessions/{}/position", session_id),
+                method: req.method().clone(),
+                headers: convert_headers(req.headers()),
+                body: Some(body),
+                query: req.uri().query().map(String::from),
+            };
+
+            match proxy.forward(proxy_req).await {
+                Ok(response) => {
+                    let mut http_response = HttpResponse::build(response.status);
+                    http_response.insert_header(("X-RateLimit-Limit", rate_info.limit.to_string()));
+                    http_response
+                        .insert_header(("X-RateLimit-Remaining", rate_info.remaining.to_string()));
+                    http_response.insert_header(("X-RateLimit-Reset", rate_info.reset.to_string()));
+
+                    for (key, value) in response.headers.iter() {
+                        http_response.insert_header((key.clone(), value.clone()));
+                    }
+
+                    http_response.body(response.body)
+                }
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            }
+        }
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 
@@ -127,22 +242,50 @@ async fn get_user_sessions(
     req: HttpRequest,
     path: web::Path<String>,
     proxy: web::Data<Arc<ServiceProxy>>,
+    rate_limiter: web::Data<Arc<RateLimiter>>,
 ) -> impl Responder {
     let user_id = path.into_inner();
-    let proxy_req = ProxyRequest {
-        service: "playback".to_string(),
-        path: format!("/api/v1/users/{}/sessions", user_id),
-        method: req.method().clone(),
-        headers: convert_headers(req.headers()),
-        body: None,
-        query: req.uri().query().map(String::from),
-    };
+    let user_ctx = get_user_context(&req);
+    let ctx_user_id = user_ctx
+        .as_ref()
+        .map(|u| u.user_id.as_str())
+        .unwrap_or("anonymous");
+    let tier = user_ctx
+        .as_ref()
+        .map(|u| u.tier.as_str())
+        .unwrap_or("anonymous");
 
-    match proxy.forward(proxy_req).await {
-        Ok(response) => HttpResponse::build(response.status).body(response.body),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": e.to_string()
-        })),
+    match rate_limiter.check_rate_limit(ctx_user_id, tier).await {
+        Ok(rate_info) => {
+            let proxy_req = ProxyRequest {
+                service: "playback".to_string(),
+                path: format!("/api/v1/users/{}/sessions", user_id),
+                method: req.method().clone(),
+                headers: convert_headers(req.headers()),
+                body: None,
+                query: req.uri().query().map(String::from),
+            };
+
+            match proxy.forward(proxy_req).await {
+                Ok(response) => {
+                    let mut http_response = HttpResponse::build(response.status);
+                    http_response.insert_header(("X-RateLimit-Limit", rate_info.limit.to_string()));
+                    http_response
+                        .insert_header(("X-RateLimit-Remaining", rate_info.remaining.to_string()));
+                    http_response.insert_header(("X-RateLimit-Reset", rate_info.reset.to_string()));
+
+                    for (key, value) in response.headers.iter() {
+                        http_response.insert_header((key.clone(), value.clone()));
+                    }
+
+                    http_response.body(response.body)
+                }
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string()
+                })),
+            }
+        }
+        Err(err) => HttpResponse::from_error(err),
     }
 }
 

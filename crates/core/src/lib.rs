@@ -23,6 +23,7 @@
 //! - `shutdown`: Graceful shutdown coordinator
 //! - `audit`: Audit logging system for tracking user actions and system events
 //! - `events`: User activity event streaming to Kafka
+//! - `sanitization`: Input sanitization utilities for preventing XSS and injection attacks
 
 pub mod audit;
 pub mod config;
@@ -37,6 +38,7 @@ pub mod observability;
 pub mod pagination;
 pub mod resilience;
 pub mod retry;
+pub mod sanitization;
 pub mod shutdown;
 pub mod telemetry;
 pub mod types;
@@ -75,6 +77,10 @@ pub use pagination::{
 };
 pub use resilience::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState};
 pub use retry::{retry_with_backoff, RetryPolicy};
+pub use sanitization::{
+    contains_xss_patterns, escape_json_string, sanitize_display_name, sanitize_html,
+    sanitize_html_with_tags, sanitize_search_query, sanitize_text,
+};
 pub use shutdown::{ShutdownConfig, ShutdownCoordinator, ShutdownHandle};
 pub use telemetry::{
     create_span, db_query_span, external_api_span, extract_trace_context, init_tracing,

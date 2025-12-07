@@ -7,6 +7,7 @@ use crate::rate_limit::RateLimiter;
 use crate::routes;
 use actix_cors::Cors;
 use actix_files as fs;
+use actix_web::http::header;
 use actix_web::{web, App, HttpServer};
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,11 +67,35 @@ impl Server {
 
         // Create HTTP server
         HttpServer::new(move || {
-            // Configure CORS
+            // Configure CORS - Get allowed origins from environment with secure default
+            let allowed_origins: Vec<String> = std::env::var("ALLOWED_ORIGINS")
+                .unwrap_or_else(|_| "https://app.mediagateway.io".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+
             let cors = Cors::default()
-                .allow_any_origin()
-                .allow_any_method()
-                .allow_any_header()
+                .allowed_origin_fn(move |origin, _req_head| {
+                    if let Ok(origin_str) = origin.to_str() {
+                        // Allow localhost origins in development
+                        if origin_str.starts_with("http://localhost:") ||
+                           origin_str.starts_with("http://127.0.0.1:") {
+                            return std::env::var("RUST_ENV")
+                                .map(|v| v != "production")
+                                .unwrap_or(true);
+                        }
+                        allowed_origins.iter().any(|allowed| allowed == origin_str)
+                    } else {
+                        false
+                    }
+                })
+                .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
+                .allowed_headers(vec![
+                    header::AUTHORIZATION,
+                    header::CONTENT_TYPE,
+                    header::ACCEPT,
+                    header::ORIGIN,
+                ])
                 .expose_headers(vec![
                     "X-Request-ID",
                     "X-Correlation-ID",
@@ -78,6 +103,7 @@ impl Server {
                     "X-RateLimit-Remaining",
                     "X-RateLimit-Reset",
                 ])
+                .supports_credentials()
                 .max_age(3600);
 
             App::new()
