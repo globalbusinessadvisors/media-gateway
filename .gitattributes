@@ -1,0 +1,42 @@
+# Media Gateway - GitHub Linguist Configuration
+# This file tells GitHub how to calculate repository language statistics
+
+# Mark vendored/third-party code (excluded from language stats)
+apps/agentdb/** linguist-vendored
+apps/agentic-flow/** linguist-vendored
+apps/agentic-synth/** linguist-vendored
+apps/arw-chrome-extension/** linguist-vendored
+apps/media-discovery/** linguist-vendored
+
+# Mark generated files (excluded from language stats)
+**/dist/** linguist-generated
+**/build/** linguist-generated
+**/*.min.js linguist-generated
+**/*.min.css linguist-generated
+**/package-lock.json linguist-generated
+**/pnpm-lock.yaml linguist-generated
+**/yarn.lock linguist-generated
+
+# Mark documentation
+docs/** linguist-documentation
+ai_docs/** linguist-documentation
+*.md linguist-documentation
+
+# Ensure Rust is properly detected as the primary language
+*.rs linguist-detectable=true
+Cargo.toml linguist-detectable=true
+Cargo.lock linguist-detectable=true
+
+# SQL migrations are documentation/config
+migrations/** linguist-documentation
+infrastructure/** linguist-documentation
+
+# Shell scripts are ops/config
+scripts/** linguist-vendored
+*.sh linguist-vendored
+
+# Config files
+*.json linguist-detectable=false
+*.yaml linguist-detectable=false
+*.yml linguist-detectable=false
+*.toml linguist-detectable=true
