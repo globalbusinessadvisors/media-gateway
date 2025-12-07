@@ -1,0 +1,50 @@
+* [33m57db79c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m feat: complete BATCH_012 tasks - test infrastructure & production hardening
+* [33m4d1e312[m feat: implement BATCH_012 tasks - test infrastructure & production hardening
+* [33mbd8832d[m feat: implement BATCH_011 tasks - compilation fixes & infrastructure artifacts
+* [33mc37b724[m feat: implement BATCH_010 tasks - compilation fixes & production hardening
+* [33m01d39ea[m feat: implement BATCH_009 tasks and generate BATCH_010_TASKS.md
+* [33m28c01e3[m feat: implement BATCH_007 tasks via 12-agent Claude-Flow swarm
+* [33m81f465d[m feat: implement BATCH_006 tasks and generate BATCH_007_TASKS.md
+* [33m0fd0244[m feat: implement BATCH_003 tasks via 9-agent Claude-Flow swarm
+* [33m1fe0dfa[m feat: generate BATCH_002_TASKS.md via 9-agent swarm analysis
+* [33m063d7ea[m feat: implement BATCH_001 tasks via 9-agent Claude-Flow swarm
+* [33mb6c74ac[m docs: add SPARC-aligned Action List from 9-agent analysis swarm
+* [33m3d4c58a[m feat: Implement complete Media Gateway platform per SPARC specifications
+* [33m4f2af05[m feat: add SPARC planning documents, docs, and project config
+* [33maac95bb[m docs: add SPARC Completion Phase master document
+* [33m1964379[m feat: add agentdb, agentic-flow, and agentic-synth to apps/
+* [33m5d1935f[m clean up
+* [33m6e9c051[m feat: Implement MCP Server with SSE and STDIO transports
+*   [33m33c911b[m Merge pull request #11 from nolandubeau/update-docs-hackathon-arw
+[32m|[m[33m\[m  
+[32m|[m *   [33m535c0c4[m Merge branch 'main' into update-docs-hackathon-arw
+[32m|[m [34m|[m[32m\[m  
+[32m|[m [34m|[m[32m/[m  
+[32m|[m[32m/[m[34m|[m   
+* [34m|[m   [33m730cd92[m Merge pull request #10 from proffesor-for-testing/hackathon-work
+[36m|[m[1;31m\[m [34m\[m  
+[36m|[m * [34m|[m [33mfe89a8b[m fix: resolve critical security vulnerabilities (Issue #9)
+[36m|[m * [34m|[m [33mb90517f[m cf+aqe init, gitignore update
+[36m|[m[36m/[m [34m/[m  
+[36m|[m * [33m792ab20[m Update docs to reflect hackathon CLI + ARW reference implementations
+[36m|[m[36m/[m  
+* [33m541ffe0[m Add live hackathon event link to README
+*   [33mcd1dce5[m Merge pull request #4 from agenticsorg/claude/update-readme-hackathon-018TuLFDdsmYGxzts51EW65s
+[1;32m|[m[1;33m\[m  
+[1;32m|[m * [33m5c29be6[m Update README to Media Gateway Hackathon branding
+[1;32m|[m[1;32m/[m  
+*   [33m0d7569c[m Merge pull request #3 from agenticsorg/claude/hackathon-cli-init-01KeUhpdeEyNPV4dHMuKq7vJ
+[1;34m|[m[1;35m\[m  
+[1;34m|[m * [33m448f099[m Update README with agentic integration docs (v1.2.0)
+[1;34m|[m * [33m9aff30d[m Add CLI args for agentic integration (v1.2.0)
+* [1;35m|[m [33m213add9[m Merge pull request #2 from agenticsorg/claude/hackathon-cli-init-01KeUhpdeEyNPV4dHMuKq7vJ
+[1;36m|[m[1;35m\[m[1;35m|[m 
+[1;36m|[m * [33m51adbaf[m Fix CLI and README to use npx agentics-hackathon commands
+* [31m|[m [33me371d3d[m Merge pull request #1 from agenticsorg/claude/hackathon-cli-init-01KeUhpdeEyNPV4dHMuKq7vJ
+[32m|[m[31m\[m[31m|[m 
+[32m|[m * [33m78f80f9[m Release v1.1.0 - Add 8 new packages and detailed help system
+[32m|[m * [33m9e6bf7d[m Publish agentics-hackathon v1.0.0 to npm
+[32m|[m * [33me13794d[m Fix TypeScript build issues and add package-lock
+[32m|[m * [33mdc3dc4b[m Add @agenticsorg/hackathon CLI and MCP server
+[32m|[m[32m/[m  
+* [33m22199f7[m Initial commit
